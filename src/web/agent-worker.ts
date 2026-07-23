@@ -16,7 +16,6 @@ import {
 } from './agent-process.js'
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
 import { detectPaneState } from '../pane-state.js'
-import { detectPaneState } from '../pane-state.js'
 import { notifyChannel } from '../notify.js'
 import { detectAgentCli } from '../cli-detector.js'
 
