@@ -81,10 +81,16 @@ export function getModelsFromCli(cli: DetectedCli): Array<{id: string, label: st
     try {
       out = execSync(`${cli.binPath} models`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] })
     } catch {
-      // Fallback for shell aliases
-      out = execSync(`bash -ic "${cli.binPath} models"`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] })
+      try {
+        out = execSync(`zsh -ic "${cli.binPath} models"`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] })
+      } catch {
+        out = execSync(`bash -ic "${cli.binPath} models"`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] })
+      }
     }
-    const lines = out.split('\n').map(l => l.trim()).filter(l => l.length > 0)
+    
+    // Strip ANSI escape codes
+    const cleanOut = out.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '')
+    const lines = cleanOut.split('\n').map(l => l.trim()).filter(l => l.length > 0)
     
     const models = lines
       .filter(l => !l.startsWith('---') && !l.startsWith('===') && !l.includes('ID')) // Skip headers
