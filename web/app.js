@@ -3381,6 +3381,36 @@ async function loadAvailableModels() {
     }
     if (hint) hint.style.display = deepseekModels.length === 0 ? 'block' : 'none'
 
+    const geminiModels = Array.isArray(data.gemini) ? data.gemini : []
+    const geminiGroups = [document.getElementById('geminiModelGroup'), document.getElementById('agentModelGeminiGroup')]
+    for (const group of geminiGroups) {
+      if (!group) continue
+      group.innerHTML = ''
+      if (geminiModels.length === 0) { group.style.display = 'none'; continue }
+      group.style.display = ''
+      for (const m of geminiModels) {
+        const opt = document.createElement('option')
+        opt.value = m.id
+        opt.textContent = m.label
+        group.appendChild(opt)
+      }
+    }
+
+    const codexModels = Array.isArray(data.codex) ? data.codex : []
+    const codexGroups = [document.getElementById('codexModelGroup'), document.getElementById('agentModelCodexGroup')]
+    for (const group of codexGroups) {
+      if (!group) continue
+      group.innerHTML = ''
+      if (codexModels.length === 0) { group.style.display = 'none'; continue }
+      group.style.display = ''
+      for (const m of codexModels) {
+        const opt = document.createElement('option')
+        opt.value = m.id
+        opt.textContent = m.label
+        group.appendChild(opt)
+      }
+    }
+
     // OpenRouter: two optgroups per select (Auto = weekly-fresh tier
     // recommendation, value `openrouter-auto:<tier>`; Manual = the 2 concrete
     // ids per tier). Backend gates the whole block behind the vault key, so a
