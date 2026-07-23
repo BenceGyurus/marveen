@@ -60,3 +60,39 @@ export function detectAgentCli(): DetectedCli {
   cachedCli = { type: 'claude', binPath: 'claude' }
   return cachedCli
 }
+
+export function getModelsFromCli(cli: DetectedCli): Array<{id: string, label: string}> | null {
+  try {
+    // Attempt standard JSON output
+    try {
+      const out = execSync(`${cli.binPath} models --json`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] })
+      const data = JSON.parse(out)
+      if (Array.isArray(data)) {
+        return data.map((m: any) => ({
+          id: m.id || m.name,
+          label: m.label || m.displayName || m.name || m.id
+        }))
+      }
+    } catch (e) {
+      // Fall through to plain text parsing
+    }
+
+    const out = execSync(`${cli.binPath} models`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] })
+    const lines = out.split('\n').map(l => l.trim()).filter(l => l.length > 0)
+    
+    const models = lines
+      .filter(l => !l.startsWith('---') && !l.startsWith('===') && !l.includes('ID')) // Skip headers
+      .map(l => {
+        const match = l.match(/^([a-zA-Z0-9.\-_]+)(?:\s+[-|:]\s+|\s+)(.*)$/)
+        if (match) {
+          return { id: match[1], label: match[2] ? `${match[2]} (${match[1]})` : match[1] }
+        }
+        return { id: l.split(/\s+/)[0], label: l }
+      })
+    
+    return models.length > 0 ? models : null
+  } catch (err) {
+    logger.debug({ err, cli: cli.type }, 'Could not read models from CLI')
+    return null
+  }
+}
