@@ -1191,7 +1191,9 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // suffix) are not glob-expanded by the shell that tmux spawns the command in.
     const cliType = getCliBinForModel(model)
     const bin = cliType === 'agy' ? agyBin() : cliType === 'codex' ? codexBin() : claudeBin()
-    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${ollamaEnv}${deepseekEnv}${openrouterEnv}cd "${dir}" && ${bin} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
+    const isAlias = !bin.startsWith('/')
+    const invokeCmd = isAlias ? `bash -ic "${bin} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}"` : `${bin} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`
+    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${ollamaEnv}${deepseekEnv}${openrouterEnv}cd "${dir}" && ${invokeCmd}`.trimEnd()
     runTmux(null, ['new-session', '-d', '-s', session, cmd], { timeout: 10000 })
 
     logger.info({ name, session, channelDir: agentChannelDir }, 'Agent tmux session started')

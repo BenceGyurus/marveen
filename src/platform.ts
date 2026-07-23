@@ -65,7 +65,11 @@ export function tryResolveFromPath(name: string): string | null {
 
 export function resolveFromPath(name: string): string {
   const resolved = tryResolveFromPath(name)
-  if (!resolved) throw new Error(`Required binary not found on PATH: ${name}`)
+  if (!resolved) {
+    // Return raw name as fallback so the shell executing the command can attempt to resolve it
+    // (e.g. if it's an alias or in a profile-loaded PATH).
+    return name
+  }
   return resolved
 }
 

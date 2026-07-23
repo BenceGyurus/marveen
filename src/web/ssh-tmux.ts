@@ -150,7 +150,9 @@ export function buildRemoteLaunchCommand(opts: {
   let cli = 'claude'
   if (opts.model.startsWith('gemini-')) cli = 'agy'
   else if (opts.model.startsWith('gpt-') || opts.model.startsWith('o1-') || opts.model.startsWith('o3-')) cli = 'codex'
-  return `${path} && cd ${shQuote(opts.workdir)} && ${cli} ${cont}--dangerously-skip-permissions --model ${shQuote(opts.model)}`
+  const isAlias = !cli.startsWith('/') && cli !== 'claude' // assume claude is binary, others might be aliases
+  const invokeCmd = isAlias ? `bash -ic "${cli} ${cont}--dangerously-skip-permissions --model ${shQuote(opts.model)}"` : `${cli} ${cont}--dangerously-skip-permissions --model ${shQuote(opts.model)}`
+  return `${path} && cd ${shQuote(opts.workdir)} && ${invokeCmd}`
 }
 
 /**

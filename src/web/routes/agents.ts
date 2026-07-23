@@ -390,13 +390,16 @@ function getAgentSummary(name: string): AgentSummary {
   // no pane to inspect). One capture-pane per running agent on the list poll.
   const reauth = running ? detectReauthNeeded(capturePane(agentSessionName(name))) : { needsReauth: false }
 
+  const configuredModel = readAgentModel(name)
+  const activeModel = running ? (readActiveModelFromProjectDir(dir, runningSince ?? undefined, resolveAgentConfigDir(name).configDir ?? undefined) || configuredModel) : null
+
   return {
     name,
     displayName: readAgentDisplayName(name),
     cliType: detectAgentCli().type,
     description: extractDescriptionFromClaudeMd(claudeMd),
-    model: readAgentModel(name),
-    activeModel: running ? readActiveModelFromProjectDir(dir, runningSince ?? undefined, resolveAgentConfigDir(name).configDir ?? undefined) : null,
+    model: configuredModel,
+    activeModel,
     runningSince,
     authMode: readAgentAuthMode(name),
     securityProfile: readAgentSecurityProfile(name),

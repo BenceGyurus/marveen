@@ -227,7 +227,10 @@ elif [[ "$MAIN_MODEL" == gpt-* ]] || [[ "$MAIN_MODEL" == o1-* ]] || [[ "$MAIN_MO
   CLI_BIN="codex"
 fi
 CLAUDE="$(command -v "$CLI_BIN")"
-[ -z "$CLAUDE" ] && echo "ERROR: $CLI_BIN not found on PATH" >&2 && exit 1
+if [ -z "$CLAUDE" ]; then
+  echo "WARNING: $CLI_BIN not found on PATH. Falling back to raw name." >&2
+  CLAUDE="$CLI_BIN"
+fi
 
 # macOS main-agent config isolation (OPT-IN, default OFF).
 #
@@ -398,8 +401,13 @@ $TMUX set-environment -g CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION false 2>/dev/null 
 # just THIS session first -- never the server, never another agent's session --
 # otherwise new-session below fails with "duplicate session".
 $TMUX kill-session -t "$SESSION" 2>/dev/null || true
-$TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
-  "${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}"
+if [ "$CONTINUE_SESSION" = "true" ]; then
+  $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
+    "bash -ic \"${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --continue --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}\""
+else
+  $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
+    "bash -ic \"${MCP_BATCH_ENV}${CFG_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}\""
+fi
 
 # Session startup guard: a Claude Code first-run dialogusait auto-accept-eljuk
 # kulonben a headless session orokre parkolna a prompton es a Telegram plugin

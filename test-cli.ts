@@ -1,5 +1,3 @@
-import { getSupportedModels, getModelsFromCli } from './src/cli-detector.js'
-import { tryResolveFromPath } from './src/platform.js'
-
-console.log('Resolving agy:', tryResolveFromPath('agy'))
-console.log('Models:', getSupportedModels('agy'))
+import { detectAgentCli, getSupportedModels } from './src/cli-detector.js'
+console.log('CLI:', detectAgentCli())
+console.log('agy models:', getSupportedModels('agy'))
