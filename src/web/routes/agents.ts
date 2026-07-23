@@ -98,7 +98,7 @@ import {
 } from '../agent-process.js'
 import { addDesiredAgent, removeDesiredAgent } from '../agent-desired-state.js'
 import { RemoteStatusCache } from '../remote-status-cache.js'
-import { detectAgentCli, getModelsFromCli } from '../../cli-detector.js'
+import { detectAgentCli, getModelsFromCli, getSupportedModels } from '../../cli-detector.js'
 import type { AgentRunState } from '../ssh-tmux.js'
 import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
 import { detectPaneState } from '../../pane-state.js'
@@ -478,20 +478,14 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // options without the key would let the operator pick a model that 401s.
     const hasOpenRouter = getSecret('openrouter-fleet-key') !== null
     const detectedCli = detectAgentCli()
-    const cli = detectedCli.type
-    const cliModels = getModelsFromCli(detectedCli)
+    
+    const agyModels = getSupportedModels('agy')
+    const codexModels = getSupportedModels('codex')
     
     const orCatalog = loadOpenRouterCatalog()
     json(res, {
-      gemini: cli === 'agy' ? (cliModels || [
-        { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (erősebb)' },
-        { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (gyorsabb)' },
-        { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite (leggyorsabb)' }
-      ]) : [],
-      codex: cli === 'codex' ? (cliModels || [
-        { id: 'gpt-4o', label: 'GPT-4o (alapértelmezett)' },
-        { id: 'gpt-4o-mini', label: 'GPT-4o Mini' }
-      ]) : [],
+      gemini: agyModels ? agyModels : [],
+      codex: codexModels ? codexModels : [],
       claude: [
         { id: 'claude-fable-5', label: 'Fable 5 (legújabb)' },
         { id: 'claude-opus-4-8[1m]', label: 'Opus 4.8 (1M kontextus, alapértelmezett)' },

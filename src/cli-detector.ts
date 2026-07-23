@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { resolveFromPath } from './platform.js'
+import { resolveFromPath, tryResolveFromPath } from './platform.js'
 import { logger } from './logger.js'
 
 export type AgentCliType = 'agy' | 'codex' | 'claude'
@@ -95,4 +95,10 @@ export function getModelsFromCli(cli: DetectedCli): Array<{id: string, label: st
     logger.debug({ err, cli: cli.type }, 'Could not read models from CLI')
     return null
   }
+}
+
+export function getSupportedModels(cliType: AgentCliType): Array<{id: string, label: string}> | null {
+  const binPath = tryResolveFromPath(cliType)
+  if (!binPath) return null
+  return getModelsFromCli({ type: cliType, binPath })
 }

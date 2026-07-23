@@ -45,6 +45,16 @@ export function tryResolveFromPath(name: string): string | null {
   try {
     return execSync(`which ${name}`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
   } catch {
+    // Try interactive shell to load user PATH
+    try {
+      const shPath = execSync(`zsh -lc "which ${name}"`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+      if (shPath && existsSync(shPath)) return shPath
+    } catch {}
+    try {
+      const shPath = execSync(`bash -lc "which ${name}"`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+      if (shPath && existsSync(shPath)) return shPath
+    } catch {}
+
     for (const dir of KNOWN_BIN_DIRS) {
       const candidate = join(dir, name)
       if (existsSync(candidate)) return candidate
