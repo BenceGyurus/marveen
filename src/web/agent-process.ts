@@ -56,6 +56,14 @@ import { notifyChannel } from '../notify.js'
 // first use; see makeLazyBinResolver.
 const tmuxBin = makeLazyBinResolver('tmux')
 const claudeBin = makeLazyBinResolver('claude')
+const agyBin = makeLazyBinResolver('agy')
+const codexBin = makeLazyBinResolver('codex')
+
+export function getCliBinForModel(model: string): string {
+  if (model.startsWith('gemini-')) return 'agy'
+  if (model.startsWith('gpt-') || model.startsWith('o1-') || model.startsWith('o3-')) return 'codex'
+  return 'claude'
+}
 
 // Shared async pacing helper. Replaces the blocking synchronous `/bin/sleep`
 // (execFileSync) pauses in the tmux-driving injection hot-path so a pacing wait
@@ -1181,7 +1189,9 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     const promptSuggestionEnv = 'export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false && '
     // Single-quote `${model}` so values like `claude-opus-4-8[1m]` (1M-context
     // suffix) are not glob-expanded by the shell that tmux spawns the command in.
-    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${ollamaEnv}${deepseekEnv}${openrouterEnv}cd "${dir}" && ${claudeBin()} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
+    const cliType = getCliBinForModel(model)
+    const bin = cliType === 'agy' ? agyBin() : cliType === 'codex' ? codexBin() : claudeBin()
+    const cmd = `export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${ollamaEnv}${deepseekEnv}${openrouterEnv}cd "${dir}" && ${bin} ${continueFlag}${skipFlag}--model '${model}' ${channelFlag}`.trimEnd()
     runTmux(null, ['new-session', '-d', '-s', session, cmd], { timeout: 10000 })
 
     logger.info({ name, session, channelDir: agentChannelDir }, 'Agent tmux session started')

@@ -179,9 +179,7 @@ fi
 # global env set below.
 export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
 
-CLAUDE="$(command -v claude)"
 TMUX="$(command -v tmux)"
-[ -z "$CLAUDE" ] && echo "ERROR: claude not found on PATH" >&2 && exit 1
 [ -z "$TMUX" ]   && echo "ERROR: tmux not found on PATH" >&2 && exit 1
 
 # MCP startup-batch tuning for the MAIN session (2026-06-26).
@@ -221,6 +219,15 @@ MODEL_FLAG=""
 # Single-quote the model id so values like `claude-opus-4-8[1m]` survive the
 # tmux command-string round-trip without the inner shell glob-expanding `[1m]`.
 [ -n "$MAIN_MODEL" ] && MODEL_FLAG="--model '$MAIN_MODEL' "
+
+CLI_BIN="claude"
+if [[ "$MAIN_MODEL" == gemini-* ]]; then
+  CLI_BIN="agy"
+elif [[ "$MAIN_MODEL" == gpt-* ]] || [[ "$MAIN_MODEL" == o1-* ]] || [[ "$MAIN_MODEL" == o3-* ]]; then
+  CLI_BIN="codex"
+fi
+CLAUDE="$(command -v "$CLI_BIN")"
+[ -z "$CLAUDE" ] && echo "ERROR: $CLI_BIN not found on PATH" >&2 && exit 1
 
 # macOS main-agent config isolation (OPT-IN, default OFF).
 #
