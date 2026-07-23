@@ -57,7 +57,7 @@ export function resolveModelId(raw: string): string {
 }
 
 export function readAgentModel(name: string): string {
-  const configPath = join(agentDir(name), 'agent-config.json')
+  const configPath = name === 'main' ? join(process.cwd(), '.claude', 'settings.json') : join(agentDir(name), 'agent-config.json')
   try {
     const config = JSON.parse(readFileOr(configPath, '{}'))
     return resolveModelId(config.model || DEFAULT_MODEL)
@@ -67,7 +67,7 @@ export function readAgentModel(name: string): string {
 }
 
 export function writeAgentModel(name: string, model: string): void {
-  const configPath = join(agentDir(name), 'agent-config.json')
+  const configPath = name === 'main' ? join(process.cwd(), '.claude', 'settings.json') : join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   try { config = JSON.parse(readFileOr(configPath, '{}')) } catch {}
   config.model = model

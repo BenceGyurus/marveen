@@ -109,6 +109,18 @@ export function getModelsFromCli(cli: DetectedCli): Array<{id: string, label: st
   }
 }
 
+const FALLBACK_AGY_MODELS = [
+  { id: 'gemini-3.6-flash-high', label: 'Gemini 3.6 Flash High' },
+  { id: 'gemini-4.0-pro', label: 'Gemini 4.0 Pro' },
+]
+
+const FALLBACK_CODEX_MODELS = [
+  { id: 'gpt-4o', label: 'GPT-4o' },
+  { id: 'o1-preview', label: 'o1 Preview' },
+  { id: 'o1-mini', label: 'o1 Mini' },
+  { id: 'o3-mini', label: 'o3 Mini' },
+]
+
 export function getSupportedModels(cliType: AgentCliType): Array<{id: string, label: string}> | null {
   let binPath = tryResolveFromPath(cliType)
   if (!binPath) {
@@ -118,7 +130,9 @@ export function getSupportedModels(cliType: AgentCliType): Array<{id: string, la
   
   const models = getModelsFromCli({ type: cliType, binPath })
   if (!models) {
-     logger.warn(`Failed to parse models for ${cliType} (binPath: ${binPath}).`)
+     logger.warn(`Failed to parse models for ${cliType} (binPath: ${binPath}). Using fallbacks.`)
+     if (cliType === 'agy') return FALLBACK_AGY_MODELS
+     if (cliType === 'codex') return FALLBACK_CODEX_MODELS
   }
   return models
 }
