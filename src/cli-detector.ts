@@ -77,7 +77,13 @@ export function getModelsFromCli(cli: DetectedCli): Array<{id: string, label: st
       // Fall through to plain text parsing
     }
 
-    const out = execSync(`${cli.binPath} models`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] })
+    let out: string
+    try {
+      out = execSync(`${cli.binPath} models`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] })
+    } catch {
+      // Fallback for shell aliases
+      out = execSync(`bash -ic "${cli.binPath} models"`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] })
+    }
     const lines = out.split('\n').map(l => l.trim()).filter(l => l.length > 0)
     
     const models = lines
@@ -98,7 +104,15 @@ export function getModelsFromCli(cli: DetectedCli): Array<{id: string, label: st
 }
 
 export function getSupportedModels(cliType: AgentCliType): Array<{id: string, label: string}> | null {
-  const binPath = tryResolveFromPath(cliType)
-  if (!binPath) return null
-  return getModelsFromCli({ type: cliType, binPath })
+  let binPath = tryResolveFromPath(cliType)
+  if (!binPath) {
+    logger.warn(`tryResolveFromPath failed for ${cliType}. Trying to execute it directly as a fallback.`)
+    binPath = cliType
+  }
+  
+  const models = getModelsFromCli({ type: cliType, binPath })
+  if (!models) {
+     logger.warn(`Failed to parse models for ${cliType} (binPath: ${binPath}).`)
+  }
+  return models
 }
