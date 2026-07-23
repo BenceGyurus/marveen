@@ -9,6 +9,7 @@ import { logger } from '../../logger.js'
 import { COORDINATOR_AGENT_ID } from '../../channel-coordinator/ingest.js'
 import { sanitizeAgentIdent } from '../../prompt-safety.js'
 import { isKnownAgent } from '../agent-config.js'
+import { OWNER_NAME } from '../../config.js'
 import { readBody, json } from '../http-helpers.js'
 import { normalizeKanbanRefs } from '../kanban-ref-normalize.js'
 import { parseQualifiedId, formatQualifiedId } from '../federation/address.js'
@@ -61,10 +62,10 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     // check any process with the token could inject messages as an arbitrary
     // sender ("from": "zack" from an external attacker who obtained the token).
     // Server-side validation: the `from` claim must match a known agent on the
-    // filesystem (agents/<id>/ directory, or MAIN_AGENT_ID). This is not
-    // impersonation-proof between fleet agents (they share the same token) but
+    // filesystem (agents/<id>/ directory, or MAIN_AGENT_ID) OR the human owner.
+    // This is not impersonation-proof between fleet agents (they share the same token) but
     // it closes the "unknown sender" injection path without per-agent secrets.
-    if (!isKnownAgent(sanitizeAgentIdent(from))) {
+    if (from.trim() !== OWNER_NAME && !isKnownAgent(sanitizeAgentIdent(from))) {
       logger.warn({ from: from.trim(), to: to.trim() }, 'Rejected /api/messages POST from unregistered agent')
       json(res, { error: `unknown agent '${from.trim()}' -- from must be a registered fleet agent id` }, 403)
       return true
