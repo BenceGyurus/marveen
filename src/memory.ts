@@ -15,7 +15,9 @@ import {
 } from './db.js'
 import { runAgent } from './agent.js'
 import { logger } from './logger.js'
+import { queryVectorMemory } from './vector-store.js'
 import { wrapUntrusted, UNTRUSTED_PREAMBLE } from './prompt-safety.js'
+import { compressContext } from './headroom-proxy.js'
 
 // Dedicated cwd for the daily-digest sub-agent. We can't reuse PROJECT_ROOT
 // here -- the Marveen Telegram channels session runs claude --continue in
@@ -82,25 +84,36 @@ export async function buildMemoryContext(
 ): Promise<string> {
   const ftsResults = searchMemories(userMessage, chatId, 3)
   const recent = recentMemories(chatId, 5)
+  const vectorResults = await queryVectorMemory(userMessage, 3)
 
-  const seen = new Set<number>()
-  const combined: Memory[] = []
+  const seen = new Set<string>()
+  const combined: { id: string | number; content: string; sector: string }[] = []
 
   for (const m of [...ftsResults, ...recent]) {
-    if (!seen.has(m.id)) {
-      seen.add(m.id)
-      combined.push(m)
+    if (!seen.has(String(m.id))) {
+      seen.add(String(m.id))
+      combined.push({ id: m.id, content: m.content, sector: m.sector })
+    }
+  }
+
+  for (const v of vectorResults) {
+    if (!seen.has(v.id)) {
+      seen.add(v.id)
+      combined.push({ id: v.id, content: v.content, sector: v.metadata?.sector || 'semantic' })
     }
   }
 
   if (combined.length === 0) return ''
 
   for (const m of combined) {
-    touchMemory(m.id)
+    if (typeof m.id === 'number') {
+      touchMemory(m.id)
+    }
   }
 
   const lines = combined.map((m) => `- ${m.content} (${m.sector})`)
-  return `[Memoria kontextus]\n${lines.join('\n')}`
+  const contextText = `[Memoria kontextus]\n${lines.join('\n')}`
+  return await compressContext(contextText, 'memory')
 }
 
 const STATUS_HU: Record<string, string> = {

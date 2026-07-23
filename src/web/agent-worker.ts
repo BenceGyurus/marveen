@@ -16,7 +16,9 @@ import {
 } from './agent-process.js'
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
 import { detectPaneState } from '../pane-state.js'
+import { detectPaneState } from '../pane-state.js'
 import { notifyChannel } from '../notify.js'
+import { detectAgentCli } from '../cli-detector.js'
 
 // =============================================================================
 // Interactive-tmux agent worker (jun.15 subscription migration).
@@ -41,8 +43,6 @@ import { notifyChannel } from '../notify.js'
 // =============================================================================
 
 const TMUX = resolveFromPath('tmux')
-
-const WORKER_MODEL = process.env.MARVEEN_WORKER_MODEL || 'claude-opus-4-8[1m]'
 
 // How long to wait for a freshly launched worker to reach an idle prompt.
 const WORKER_BOOT_TIMEOUT_MS = 90_000
@@ -428,6 +428,10 @@ function sleepMs(ms: number): Promise<void> {
 function startWorkerSessionFor(ctx: WorkerCtx): void {
   if (workerSessionExists(ctx)) return
   ensureWorkerCwd(ctx)
+  
+  const cli = detectAgentCli()
+  const modelArg = cli.defaultModel ? `--model ${shArg(cli.defaultModel)}` : ''
+
   // Detached session; launch claude via a login shell so PATH + the config-dir
   // env are set. The model suffix ([1m]) is single-quoted so it is not globbed.
   // Fleet setup-token (when present) via $(cat) at launch so the secret never
@@ -437,9 +441,9 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
     (hasFleetOauthToken() ? `export CLAUDE_CODE_OAUTH_TOKEN="$(cat ${shArg(FLEET_OAUTH_TOKEN_PATH)})"; ` : '') +
     `export CLAUDE_CONFIG_DIR=${shArg(ctx.configDir)}; ` +
     `cd ${shArg(ctx.home)} && ` +
-    `claude --dangerously-skip-permissions --model ${shArg(WORKER_MODEL)}`
+    `${cli.binPath} --dangerously-skip-permissions ${modelArg}`
   execFileSync(TMUX, ['new-session', '-d', '-s', ctx.session, '-c', ctx.home, 'bash', '-lc', launch], { timeout: 8000 })
-  logger.info({ session: ctx.session, cwd: ctx.home }, 'agent-worker: launched interactive worker session')
+  logger.info({ session: ctx.session, cwd: ctx.home, cli: cli.type }, 'agent-worker: launched interactive worker session')
   logWorkerClaudeVersion(ctx)
 }
 
@@ -461,18 +465,18 @@ export function startWorkerSession(): void {
  */
 function logWorkerClaudeVersion(ctx: WorkerCtx): void {
   try {
-    const claudeBin = resolveFromPath('claude')
-    const v = execFileSync(claudeBin, ['--version'], { encoding: 'utf-8', timeout: 10_000 }).trim()
+    const cli = detectAgentCli()
+    const v = execFileSync(cli.binPath, ['--version'], { encoding: 'utf-8', timeout: 10_000 }).trim()
     const stampPath = join(ctx.home, '.last-claude-version')
     const prev = existsSync(stampPath) ? readFileSync(stampPath, 'utf-8').trim() : null
     if (prev && prev !== v) {
-      logger.warn({ prev, current: v }, 'agent-worker: Claude Code version changed since the last worker boot -- watch for new first-run chrome')
+      logger.warn({ prev, current: v }, 'agent-worker: CLI version changed since the last worker boot -- watch for new first-run chrome')
     } else {
-      logger.info({ version: v }, 'agent-worker: claude version')
+      logger.info({ version: v, cli: cli.type }, 'agent-worker: cli version')
     }
     writeFileSync(stampPath, v + '\n')
   } catch (err) {
-    logger.warn({ err }, 'agent-worker: claude version probe failed (continuing)')
+    logger.warn({ err }, 'agent-worker: cli version probe failed (continuing)')
   }
 }
 

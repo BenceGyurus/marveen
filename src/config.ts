@@ -170,7 +170,7 @@ export function systemdStatusUnits(serviceId: string): string[] {
 
 export const WEB_PORT = parseInt(env['WEB_PORT'] ?? '3420', 10)
 
-export const WEB_HOST = env['WEB_HOST'] ?? '127.0.0.1'
+export const WEB_HOST = env['WEB_HOST'] ?? '0.0.0.0'
 
 // Kanban card aging visual thresholds (hours since last update) and colours.
 // Override per-install via .env; defaults match the design spec (24/72/168h).

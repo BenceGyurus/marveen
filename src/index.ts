@@ -23,6 +23,10 @@ import { startInviteMonitor, stopInviteMonitor } from './web/channel-invites.js'
 import { ensureDiscordChannelGroup } from './web/discord-group-bootstrap.js'
 import { startChannelRequestWatcher, stopChannelRequestWatcher } from './web/channel-request-watcher.js'
 import { startStoreWatcher, stopStoreWatcher } from './store-watcher.js'
+import { initQueueManager } from './queue-manager.js'
+import { initVectorStore } from './vector-store.js'
+import { initHeadroomProxy } from './headroom-proxy.js'
+import { closeBrowser } from './browser-service.js'
 import { AGENTS_BASE_DIR } from './web/agent-config.js'
 import {
   acquirePortLock,
@@ -387,6 +391,7 @@ const shutdown = (): void => {
     if (decayInterval) clearInterval(decayInterval)
     if (digestTimer) clearTimeout(digestTimer)
     if (digestInterval) clearInterval(digestInterval)
+    try { closeBrowser().catch(() => {}) } catch (err) { logger.warn({ err }, 'closeBrowser threw during shutdown') }
 
     const hardKill = setTimeout(() => {
       logger.warn({ timeoutMs: SHUTDOWN_HARD_KILL_MS }, 'Graceful shutdown timeout, hard exit')
@@ -439,6 +444,11 @@ async function main(): Promise<void> {
   // Database
   initDatabase()
   logger.info('Adatbazis inicializalva')
+  
+  // Enterprise modules
+  initQueueManager()
+  await initVectorStore()
+  initHeadroomProxy()
 
   // Backfill embeddings for memories saved before Ollama was available.
   // Fire-and-forget: a missing or slow Ollama instance must not block startup.

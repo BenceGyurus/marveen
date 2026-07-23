@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync } from 'node:child_process'
 import { PROJECT_ROOT } from './config.js'
+import { detectAgentCli } from './cli-detector.js'
 
 const TYPING_REFRESH_MS = 4000
 import { logger } from './logger.js'
@@ -82,6 +83,13 @@ function detectLinuxLibc(): 'glibc' | 'musl' | 'unknown' {
 let cachedClaudeCodeBin: string | undefined | null = null
 function resolveClaudeCodeBin(): string | undefined {
   if (cachedClaudeCodeBin !== null) return cachedClaudeCodeBin
+  
+  const cli = detectAgentCli()
+  if (cli.type !== 'claude') {
+    cachedClaudeCodeBin = cli.binPath
+    return cachedClaudeCodeBin
+  }
+
   if (process.env.CLAUDE_CODE_BIN) {
     cachedClaudeCodeBin = process.env.CLAUDE_CODE_BIN
     return cachedClaudeCodeBin

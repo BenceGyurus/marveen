@@ -13,6 +13,7 @@
 //   - a sub-agent, ONLY if its session is running -> that agent's id
 //     (a non-running sub-agent is a silent no-op; the card just stays in
 //      in_progress rather than queuing a message for a session that isn't up)
+import { enqueueJob } from './queue-manager.js'
 
 export interface DispatchResolveOpts {
   ownerName: string
@@ -43,4 +44,12 @@ export function resolveKanbanDispatchTarget(
   if (match && opts.isRunning(match)) return match
 
   return null
+}
+
+export function enqueueKanbanTask(targetAgentId: string, cardId: string, description: string): string {
+  return enqueueJob(`agent_tasks_${targetAgentId}`, {
+    type: 'kanban',
+    cardId,
+    description
+  })
 }

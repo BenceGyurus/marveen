@@ -342,11 +342,11 @@ export function initDatabase(dbPathOverride?: string): void {
     // column already exists
   }
 
-  // Migration: embedding column for vector search
+  // Migration: remove legacy embedding column (moved to ChromaDB)
   try {
-    db.exec('ALTER TABLE memories ADD COLUMN embedding TEXT')
+    db.exec('ALTER TABLE memories DROP COLUMN embedding')
   } catch {
-    // column already exists
+    // column absent or SQLite pre-3.35
   }
 
   // Daily logs table
