@@ -2672,6 +2672,7 @@ function renderAgents() {
       </div>
       <div class="agent-card-footer">
         <span class="agent-model-badge ${escapeHtml(mainModelClass)}">${escapeHtml(mainModelLabel)}</span>
+        ${m.cliType ? `<span class="agent-model-badge" style="background: rgba(25,103,210,0.1); color: #1967d2; border: 1px solid rgba(25,103,210,0.2);">${escapeHtml(m.cliType)}</span>` : ''}
         <span class="process-indicator" title="${t('agents.marveen_process_tip')}"><span class="process-dot running"></span>${t('agents.status.running')}</span>
         <span class="tg-status" title="${t('agents.marveen_channel_tip')}"><span class="tg-dot connected"></span>${t('agents.status.online')}</span>
       </div>
@@ -2728,6 +2729,7 @@ function renderAgents() {
       </div>
       <div class="agent-card-footer">
         <span class="agent-model-badge ${escapeHtml(modelClass)}">${escapeHtml(modelLabel)}</span>
+        ${agent.cliType ? `<span class="agent-model-badge" style="background: rgba(25,103,210,0.1); color: #1967d2; border: 1px solid rgba(25,103,210,0.2);">${escapeHtml(agent.cliType)}</span>` : ''}
         <span class="process-indicator" title="${escapeHtml(processTip(isRunning))}"><span class="process-dot ${runDotClass}"></span>${runLabel}</span>
         <span class="tg-status" title="${escapeHtml(channelTip(chConnected))}"><span class="tg-dot ${chDotClass}"></span>${chLabel}</span>
       </div>

@@ -13,6 +13,7 @@ import { readBody, json, serveFile } from '../http-helpers.js'
 import { MAIN_CHANNELS_SESSION } from '../main-agent.js'
 import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
 import { readAutoRestartConfig } from '../auto-restart-store.js'
+import { detectAgentCli } from '../../cli-detector.js'
 import type { RouteContext } from './types.js'
 
 function getActiveMarveenModel(): string {
@@ -70,6 +71,7 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
     const idCore = buildMarveenIdentityCore(BOT_NAME, BRAND_NAME, MAIN_AGENT_ID)
     json(res, {
       ...idCore,
+      cliType: detectAgentCli().type,
       // Configured owner display name (OWNER_NAME). The dashboard chat view uses
       // this to pin/label the owner's own message thread instead of a hardcoded
       // literal, so a renamed install recognizes its real owner.

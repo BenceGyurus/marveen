@@ -98,6 +98,7 @@ import {
 } from '../agent-process.js'
 import { addDesiredAgent, removeDesiredAgent } from '../agent-desired-state.js'
 import { RemoteStatusCache } from '../remote-status-cache.js'
+import { detectAgentCli } from '../../cli-detector.js'
 import type { AgentRunState } from '../ssh-tmux.js'
 import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
 import { detectPaneState } from '../../pane-state.js'
@@ -318,6 +319,7 @@ function findBotTokenDuplicate(
 interface AgentSummary {
   name: string
   displayName: string
+  cliType?: string
   description: string
   model: string
   activeModel: string | null
@@ -391,6 +393,7 @@ function getAgentSummary(name: string): AgentSummary {
   return {
     name,
     displayName: readAgentDisplayName(name),
+    cliType: detectAgentCli().type,
     description: extractDescriptionFromClaudeMd(claudeMd),
     model: readAgentModel(name),
     activeModel: running ? readActiveModelFromProjectDir(dir, runningSince ?? undefined, resolveAgentConfigDir(name).configDir ?? undefined) : null,
