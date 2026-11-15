@@ -321,6 +321,12 @@ ok() { echo -e "  ${GREEN}✓${NC} $*"; }
 # change the services were never given a credential at all -- the operator's
 # terminal worked and the agents sat at "Not logged in".
 service_auth_present() {
+  if grep -qE '^MAIN_AGENT_MODEL=(codex|agy):' "$INSTALL_DIR/.env" 2>/dev/null; then
+    return 0
+  fi
+  if [ "${ORCH_CLI:-claude}" = "codex" ] || [ "${ORCH_CLI:-claude}" = "agy" ]; then
+    return 0
+  fi
   grep -qE '^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=.+' "$INSTALL_DIR/.env" 2>/dev/null && return 0
   [ -s "$INSTALL_DIR/store/.claude-oauth-token" ] && return 0
   return 1
@@ -627,9 +633,64 @@ _install_bun() {
 _bun_present() { [ -x "$BUN_INSTALL/bin/bun" ] && "$BUN_INSTALL/bin/bun" --version >/dev/null 2>&1; }
 BUN_PIN="1.4.4"
 
+# Fo orchestrator CLI valasztas (Claude / Codex / Antigravity)
+ORCH_CLI="${MARVEEN_ORCHESTRATOR:-}"
+ORCH_DEFAULT_MODEL="${MARVEEN_MAIN_MODEL:-}"
+if [ -z "$ORCH_CLI" ] && [ -f "$INSTALL_DIR/.env" ]; then
+  _env_main_model="$(grep -E '^MAIN_AGENT_MODEL=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+  case "$_env_main_model" in
+    codex:*) ORCH_CLI="codex" ;;
+    agy:*)   ORCH_CLI="agy" ;;
+  esac
+fi
+if [ -z "$ORCH_CLI" ] && [ -t 0 ]; then
+  echo ""
+  echo -e "  ${BOLD}Melyik AI CLI legyen a fo orchestrator (Marveen)?${NC}"
+  echo -e "    ${BOLD}1)${NC} Claude Code (alapertelmezett)"
+  echo -e "    ${BOLD}2)${NC} OpenAI Codex CLI (codex — Claude Code nelkul is mukodik)"
+  echo -e "    ${BOLD}3)${NC} Google Antigravity CLI (agy — Claude Code nelkul is mukodik)"
+  read -rp "  Valasztas [1]: " _orch_choice
+  case "${_orch_choice:-1}" in
+    2|codex|CODEX) ORCH_CLI="codex" ;;
+    3|agy|AGY|antigravity) ORCH_CLI="agy" ;;
+    *) ORCH_CLI="claude" ;;
+  esac
+fi
+ORCH_CLI="${ORCH_CLI:-claude}"
+case "$ORCH_CLI" in
+  codex)
+    ORCH_DEFAULT_MODEL="${ORCH_DEFAULT_MODEL:-codex:gpt-5.4}"
+    if [ ! -x "/Applications/ChatGPT.app/Contents/Resources/codex" ] && ! command -v codex &>/dev/null; then
+      echo -e "  OpenAI Codex CLI telepitese (@openai/codex)..."
+      ensure_global_npm_writable >/dev/null 2>&1 || true
+      if [ "${NPM_NEEDS_SUDO:-}" = "1" ]; then
+        root_npm_install_global @openai/codex || true
+      else
+        npm install -g @openai/codex || true
+      fi
+      hash -r
+    fi
+    echo -e "  ${GREEN}✓${NC} OpenAI Codex CLI orchestrator ($ORCH_DEFAULT_MODEL)"
+    ;;
+  agy|antigravity)
+    ORCH_CLI="agy"
+    ORCH_DEFAULT_MODEL="${ORCH_DEFAULT_MODEL:-agy:gemini-3-pro-high}"
+    if [ -x "$HOME/.antigravity/antigravity/bin/agy" ] || command -v agy &>/dev/null; then
+      echo -e "  ${GREEN}✓${NC} Google Antigravity CLI (agy) orchestrator ($ORCH_DEFAULT_MODEL)"
+    else
+      warn "Az 'agy' CLI nincs a PATH-on (~/.antigravity/antigravity/bin/agy). Add hozza az Antigravity CLI-t."
+    fi
+    ;;
+  *)
+    ORCH_CLI="claude"
+    ;;
+esac
+
 # Check Claude Code CLI
 echo ""
-if ! command -v claude &>/dev/null; then
+if [ "$ORCH_CLI" != "claude" ]; then
+  echo -e "  ${GREEN}✓${NC} Claude Code telepites kihagyva ($ORCH_CLI orchestrator)"
+elif ! command -v claude &>/dev/null; then
   echo -e "  ${RED}✗${NC} $(_t macos.claude_missing)"
   echo -e "${ORANGE}$(_t macos.install_claude_hint)${NC}"
   read -rp "$(_t prompt_install_claude)" INSTALL_CLAUDE
@@ -650,15 +711,23 @@ if ! command -v claude &>/dev/null; then
     else
       npm install -g @anthropic-ai/claude-code
     fi
+  elif [ -x "/Applications/ChatGPT.app/Contents/Resources/codex" ] || command -v codex &>/dev/null; then
+    ORCH_CLI="codex"
+    ORCH_DEFAULT_MODEL="${ORCH_DEFAULT_MODEL:-codex:gpt-5.4}"
+    echo -e "  ${GREEN}✓${NC} Codex CLI automatikusan kivalasztva orchestratorkent ($ORCH_DEFAULT_MODEL)"
+  elif [ -x "$HOME/.antigravity/antigravity/bin/agy" ] || command -v agy &>/dev/null; then
+    ORCH_CLI="agy"
+    ORCH_DEFAULT_MODEL="${ORCH_DEFAULT_MODEL:-agy:gemini-3-pro-high}"
+    echo -e "  ${GREEN}✓${NC} Antigravity (agy) automatikusan kivalasztva orchestratorkent ($ORCH_DEFAULT_MODEL)"
   else
     # A javasolt parancs KULON, masolhato sorban -- egy workshop-resztvevo
     # kezzel gepelte at es egyetlen karakteren (@ = AltGr) elbukott.
     echo -e "  ${DIM}Telepitsd (masold ki az alabbi sort):${NC}"
     echo "    npm install -g @anthropic-ai/claude-code"
-    fail "Claude Code CLI szukseges a futtatashoz."
+    fail "Claude Code CLI (vagy codex / agy) szukseges a futtatashoz."
   fi
 fi
-echo -e "  ${GREEN}✓${NC} Claude Code CLI"
+[ "$ORCH_CLI" = "claude" ] && echo -e "  ${GREEN}✓${NC} Claude Code CLI"
 
 if [ -f "$INSTALL_DIR/scripts/install-headroom.sh" ]; then
   echo -e "  Headroom AI (kontextus- es token-optimalizalas) telepitese..."
@@ -1195,6 +1264,9 @@ if [ -d "$INSTALL_DIR/dist" ]; then
   _built_commit="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)"
   [ -n "$_built_commit" ] && printf '%s\n' "$_built_commit" > "$INSTALL_DIR/dist/.built-commit"
 fi
+if [ "${ORCH_CLI:-claude}" != "claude" ] && [ -f "$INSTALL_DIR/dist/cli-detector.js" ]; then
+  PATH="$NODE_BIN_DIR:$PATH" node -e "import(process.argv[1]).then(m=>m.prepareWorkspaceForCli(process.argv[2], process.argv[3]))" "$INSTALL_DIR/dist/cli-detector.js" "$INSTALL_DIR" "$ORCH_CLI" 2>/dev/null || true
+fi
 
 INSTALL_STEP="configuration"
 # Step 6: Configuration
@@ -1267,6 +1339,9 @@ env_merge_key BRAND_NAME "${BRAND_NAME}"
 env_merge_key MAIN_AGENT_ID "${MAIN_AGENT_ID}"
 env_merge_key SERVICE_ID "${SERVICE_ID}"
 env_merge_key WEB_PORT "${WEB_PORT:-3420}"
+if [ -n "${ORCH_DEFAULT_MODEL:-}" ]; then
+  env_merge_key MAIN_AGENT_MODEL "${ORCH_DEFAULT_MODEL}"
+fi
 # The fleet's own guards alert under their OWN names: the prod-tree guard
 # (scripts/install-prod-tree-guard-hook.sh) and the channels.sh shared-root
 # guard. The message route accepts a sender only if it is a registered agent,
@@ -1344,7 +1419,10 @@ if [ -z "$_svc_token" ]; then
 fi
 _svc_apikey="$(grep -E '^ANTHROPIC_API_KEY=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
 
-if ! service_auth_present; then
+if [ "${ORCH_CLI:-claude}" = "codex" ] || [ "${ORCH_CLI:-claude}" = "agy" ] || grep -qE '^MAIN_AGENT_MODEL=(codex|agy):' "$INSTALL_DIR/.env" 2>/dev/null; then
+  INSTALL_AUTH_STATE="OK"
+  ok "Fo orchestrator ($ORCH_CLI) aktivalva -- Claude hitelesitesi proba kihagyva"
+elif ! service_auth_present; then
   INSTALL_AUTH_STATE="BROKEN"
 elif ! command -v claude >/dev/null 2>&1; then
   INSTALL_AUTH_STATE="UNKNOWN"

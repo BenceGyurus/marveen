@@ -4339,7 +4339,7 @@ async function openMarveenDetail() {
   avatar.innerHTML = `<img src="/api/marveen/avatar${avatarBust()}" alt="${escapeHtml(displayName)}">`
   document.getElementById('agentDetailName').textContent = displayName
   document.getElementById('agentDetailDesc').textContent = m.description || ''
-  document.getElementById('agentDetailModel').textContent = m.model || '-'
+  document.getElementById('agentDetailModel').textContent = formatModelBadgeLabel(m.model || '-', m.cliType)
   // CHANNELUNCONF1110: it said "connected" unconditionally, also on an install whose channel has no token.
   document.getElementById('agentDetailChStatus').innerHTML = m.mainChannelUnconfigured
     ? `<span class="tg-status"><span class="tg-dot"></span>${t('agents.channel.not_configured')}</span>`
@@ -4377,9 +4377,11 @@ async function openMarveenDetail() {
     }
     marveenModelSelect.value = mv
   }
+  const mainModelGroup = document.getElementById('mainOrchestratorModelGroup')
+  if (mainModelGroup) mainModelGroup.hidden = false
   // Populate the model dropdown groups (auto/manual) AND surface the OpenRouter
   // curation button -- this is the main agent, the only place curation lives.
-  loadAvailableModels()
+  loadAvailableModels().then(() => syncMainModelSelectOptions(m.activeModel || m.model || ''))
   // Surface the "channels restart" button -- destructive, but mobile-safe
   // when the Telegram plugin wedges and you're away from a terminal.
   document.getElementById('marveenRestartBtn').hidden = false
@@ -4557,6 +4559,35 @@ function findMatchingModelOption(sel, rawValue) {
   if (!sel || !rawValue) return null
   const opts = Array.from(sel.options)
   return opts.find(o => o.value === rawValue) || opts.find(o => o.dataset && o.dataset.rawId === rawValue) || null
+}
+
+function syncMainModelSelectOptions(currentModel) {
+  const src = document.getElementById('editAgentModel')
+  const dst = document.getElementById('editMainModelSelect')
+  if (!src || !dst) return
+  const prev = currentModel || dst.value || ''
+  dst.innerHTML = ''
+  for (const child of Array.from(src.children)) {
+    if (child.tagName === 'OPTGROUP') {
+      if (child.id === 'editAgentModelCustomProviderGroup') continue
+      if (child.style.display === 'none' || child.children.length === 0) continue
+      const grp = child.cloneNode(true)
+      dst.appendChild(grp)
+    }
+  }
+  const mv = prev.trim()
+  if (mv) {
+    let matched = findMatchingModelOption(dst, mv)
+    if (!matched) {
+      const opt = document.createElement('option')
+      opt.value = mv
+      opt.className = 'dynamic-model-opt'
+      opt.textContent = mv
+      dst.appendChild(opt)
+      matched = opt
+    }
+    dst.value = matched.value
+  }
 }
 
 function populateDynamicCliGroup(groupIds, models, groupLabel) {
@@ -4995,8 +5026,10 @@ async function openAgentDetail(agentName) {
   // Process control
   updateProcessControl(currentAgent)
 
-  // Channels restart button is Marveen-only -- hide on normal agents.
+  // Channels restart button and main-model selector are Marveen-only -- hide on normal agents.
   document.getElementById('marveenRestartBtn').hidden = true
+  const mainModelGroup = document.getElementById('mainOrchestratorModelGroup')
+  if (mainModelGroup) mainModelGroup.hidden = true
 
   // Restore editable Settings (Marveen detail flips this to read-only).
   applyMarveenReadonlyMode(false)
@@ -5745,6 +5778,10 @@ async function loadAvailableModels() {
     }
     updateCustomModelIdRow(document.getElementById('editAgentModel'))
     updateCustomModelIdRow(document.getElementById('agentModel'))
+    const mainModelGroup = document.getElementById('mainOrchestratorModelGroup')
+    if (mainModelGroup && !mainModelGroup.hidden) {
+      syncMainModelSelectOptions(currentAgent?.activeModel || currentAgent?.model || '')
+    }
   } catch { /* dashboard not available */ }
 }
 
@@ -6023,6 +6060,43 @@ document.getElementById('saveModelBtn').addEventListener('click', async () => {
     startModelRestartPolling(name, newModel, triggeredAt)
   } catch { showToast(t('common.error_save')) }
 })
+
+const saveMainModelBtn = document.getElementById('saveMainModelBtn')
+if (saveMainModelBtn) {
+  saveMainModelBtn.addEventListener('click', async () => {
+    const sel = document.getElementById('editMainModelSelect')
+    const newModel = sel ? sel.value.trim() : ''
+    if (!newModel) return
+    saveMainModelBtn.disabled = true
+    try {
+      const res = await fetch('/api/marveen/model', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: newModel }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        showToast(data.error || t('common.error_save'))
+        return
+      }
+      if (window._marveen) {
+        window._marveen.model = data.model || newModel
+        window._marveen.cliType = data.cliType || window._marveen.cliType
+      }
+      if (currentAgent) {
+        currentAgent.model = data.model || newModel
+        currentAgent.cliType = data.cliType || currentAgent.cliType
+      }
+      document.getElementById('agentDetailModel').textContent = formatModelBadgeLabel(data.model || newModel, data.cliType)
+      renderAgents()
+      showToast(t('agents.toast.model_save_restart'))
+    } catch {
+      showToast(t('common.error_save'))
+    } finally {
+      saveMainModelBtn.disabled = false
+    }
+  })
+}
 
 document.getElementById('modelSuggestBtn').addEventListener('click', async () => {
   if (!currentAgent) return

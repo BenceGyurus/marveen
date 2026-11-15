@@ -2718,6 +2718,16 @@
 
         <!-- Tab: Settings -->
         <div class="tab-panel" id="tabSettings" hidden>
+          <div class="form-group" id="mainOrchestratorModelGroup" hidden>
+            <label for="editMainModelSelect">Fő orchestrator modell / CLI (Claude, Codex, Antigravity)</label>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <select id="editMainModelSelect" style="flex:1;min-width:220px"></select>
+              <button class="btn-secondary btn-compact" id="saveMainModelBtn" type="button" data-i18n="common.btn.save">Mentés</button>
+            </div>
+            <small style="display:block;margin-top:4px;color:var(--text-muted);font-size:12px">
+              Választhatsz Claude Code, OpenAI Codex (<code>codex:*</code>) vagy Google Antigravity (<code>agy:*</code>) modellt fő orchestratornak is. Mentéskor a fő munkamenet automatikusan újraindul.
+            </small>
+          </div>
           <div class="form-group" id="marveenReadonlyNote" hidden>
             <div style="padding:12px 14px;background:var(--bg-input);border-radius:var(--radius);border-left:3px solid var(--accent);font-size:13px;line-height:1.5;color:var(--text-muted)">
               <strong style="color:var(--text)" data-i18n="agents.detail.main_readonly">Főagent konfiguráció -- csak olvasható</strong><br>

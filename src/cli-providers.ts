@@ -373,6 +373,11 @@ export function syncCliMcpConfig(
     if (headroomBin) {
       servers.headroom = { command: headroomBin, args: ['mcp', 'serve'] }
     }
+    const baseDir = mcpJsonPath ? dirname(mcpJsonPath) : ''
+    const replyMcpScript = baseDir ? join(baseDir, 'scripts', 'channel-reply-mcp.mjs') : ''
+    if (replyMcpScript && existsSync(replyMcpScript) && !lstatSync(replyMcpScript).isSymbolicLink()) {
+      servers.marveen_telegram = { command: process.execPath, args: [replyMcpScript] }
+    }
     if (Object.keys(servers).length === 0) return false
 
     if (cliType === 'codex') {

@@ -184,6 +184,15 @@ fi
 # shellcheck disable=SC2086 # word-split on purpose: space-separated plugin ids
 EXTRA_SETTINGS_FLAG="$(main_extra_settings_flag "$INSTALL_DIR" "$PRIMARY_PLUGIN_ID" $CHANNEL_PLUGINS_EXTRA)"
 
+# Non-Claude orchestrators (Codex / Antigravity) rely on channel-coordinator +
+# marveen_telegram MCP instead of Claude Code plugins or /loop keepalive files.
+_MAIN_CFG_MODEL="$(grep -E '^MAIN_AGENT_MODEL=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+case "$_MAIN_CFG_MODEL" in
+  codex:*|openai:*|agy:*|antigravity:*|gpt-*|gemini-*|o1-*|o3-*|o4-*)
+    exit 0
+    ;;
+esac
+
 # NB: use TMUX_BIN, not TMUX -- the latter is tmux's own env var (socket,pid,
 # session); assigning the binary path to it corrupts server-socket detection.
 TMUX_BIN="$(command -v tmux)"

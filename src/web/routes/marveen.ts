@@ -7,7 +7,7 @@ import {
 } from '../../config.js'
 import { getEffectiveSettingValue } from '../../settings-store.js'
 import { readMarveenTelegramConfig, readMarveenDiscordConfig, readMarveenSlackConfig, readMarveenGooglechatConfig, readMarveenTeamsConfig, sendMarveenAvatarChange } from '../telegram.js'
-import { hardRestartMarveenChannels } from '../channel-monitor.js'
+import { readConfiguredMainModel, hardRestartMarveenChannels } from '../channel-monitor.js'
 import { mainChannelUnconfigured } from '../main-channel-configured.js'
 import { gateManualRestart, MANUAL_RESTART_FORCE_HINT, wantsForceRestart } from '../manual-restart-gate.js'
 import { readFileOr } from '../agent-config.js'
@@ -15,13 +15,15 @@ import { nicknameFor } from '../team-nicknames.js'
 import { parseMultipart } from '../multipart.js'
 import { readBody, json, serveFile } from '../http-helpers.js'
 import { MAIN_CHANNELS_SESSION } from '../main-agent.js'
-import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
+import { readActiveModelFromProjectDir, readAltCliActiveModel, readContextTokensFromProjectDir } from '../active-model.js'
 import { readAutoRestartConfig } from '../auto-restart-store.js'
 import { configDirFor } from '../main-transcript-root.js'
 import type { RouteContext } from './types.js'
 import { logger } from '../../logger.js'
 import { reportNonColourSetting } from '../../css-color.js'
-import { getCliTypeForModel } from '../../cli-detector.js'
+import { getCliTypeForModel, detectAvailableClis, prepareWorkspaceForCli } from '../../cli-detector.js'
+import { isValidModelId } from '../../model-id.js'
+import { updateEnvFile } from '../../env.js'
 
 // A colour setting as served to the dashboard; one that is not a CSS colour
 // is logged (once per value) -- the dashboard shows its default for it.
@@ -30,12 +32,13 @@ function colourSetting(key: string): unknown {
 }
 
 function getActiveMarveenModel(): string {
-  // configDirFor, not the host default: when the channels session runs on its
-  // own CLAUDE_CONFIG_DIR, the default root holds a pre-migration transcript
-  // that still parses, so the card would show a model the session stopped
-  // using. Display, not a decision -- but a wrong number here is what makes
-  // someone trust the wrong root elsewhere.
-  return readActiveModelFromProjectDir(PROJECT_ROOT, undefined, configDirFor(MAIN_AGENT_ID)) ?? 'unknown'
+  const configured = readConfiguredMainModel(PROJECT_ROOT)
+  const configuredCli = getCliTypeForModel(configured)
+  if (configuredCli !== 'claude') {
+    return readAltCliActiveModel(PROJECT_ROOT) ?? configured
+  }
+  const claudeActive = readActiveModelFromProjectDir(PROJECT_ROOT, undefined, configDirFor(MAIN_AGENT_ID))
+  return claudeActive ?? readAltCliActiveModel(PROJECT_ROOT) ?? configured ?? 'unknown'
 }
 
 // Pure identity-core of the /api/marveen payload: the brand-relevant fields the
@@ -173,6 +176,33 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
   // remote identity rewrite of the live agent.
   if (path === '/api/marveen' && method === 'PUT') {
     json(res, { ok: true, readonly: true })
+    return true
+  }
+
+  if (path === '/api/marveen/model' && method === 'PUT') {
+    let parsed: { model?: unknown } = {}
+    try {
+      parsed = JSON.parse((await readBody(req)).toString('utf-8') || '{}') as { model?: unknown }
+    } catch {
+      json(res, { error: 'Invalid JSON body' }, 400)
+      return true
+    }
+    const nextModel = typeof parsed.model === 'string' ? parsed.model.trim() : ''
+    if (!nextModel || !isValidModelId(nextModel)) {
+      json(res, { error: 'Invalid model ID' }, 400)
+      return true
+    }
+    const cliType = getCliTypeForModel(nextModel)
+    const tools = detectAvailableClis()
+    const toolInfo = tools[cliType]
+    if (toolInfo && !toolInfo.available) {
+      json(res, { error: `${cliType} CLI is not installed on this host` }, 400)
+      return true
+    }
+    updateEnvFile({ MAIN_AGENT_MODEL: nextModel })
+    prepareWorkspaceForCli(PROJECT_ROOT, cliType)
+    const restartRes = hardRestartMarveenChannels()
+    json(res, { ok: true, model: nextModel, cliType, restarting: restartRes.ok, ...(restartRes.ok ? {} : { restartError: restartRes.error }) })
     return true
   }
 

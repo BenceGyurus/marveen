@@ -208,6 +208,61 @@ resolve_main_model() {
   printf '%s' "$_m"
 }
 
+resolve_main_cli_type() {
+  local _m="${1:-}" _cli=""
+  if [ -n "$_m" ] && command -v node >/dev/null 2>&1 && [ -f "$INSTALL_DIR/dist/cli-detector.js" ]; then
+    _cli="$(node -e "import(process.argv[1]).then(m=>process.stdout.write(m.getCliTypeForModel(process.argv[2])))" "$INSTALL_DIR/dist/cli-detector.js" "$_m" 2>/dev/null || true)"
+  fi
+  case "$_cli" in
+    claude|codex|agy) printf '%s' "$_cli"; return 0 ;;
+  esac
+  case "$_m" in
+    codex:*|openai:*|gpt-*|o1|o1-*|o3|o3-*|o4|o4-*|codex-*) printf 'codex' ;;
+    agy:*|antigravity:*|gemini-*|agy-*|*-low|*-medium|*-high|*-xhigh) printf 'agy' ;;
+    *) printf 'claude' ;;
+  esac
+}
+
+strip_cli_model_prefix() {
+  case "${1:-}" in
+    claude:*)      printf '%s' "${1#claude:}" ;;
+    anthropic:*)   printf '%s' "${1#anthropic:}" ;;
+    codex:*)       printf '%s' "${1#codex:}" ;;
+    openai:*)      printf '%s' "${1#openai:}" ;;
+    agy:*)         printf '%s' "${1#agy:}" ;;
+    antigravity:*) printf '%s' "${1#antigravity:}" ;;
+    *)             printf '%s' "${1:-}" ;;
+  esac
+}
+
+resolve_cli_bin() {
+  local _name="$1" _p=""
+  _p="$(command -v "$_name" 2>/dev/null || true)"
+  if [ -z "$_p" ]; then
+    for _cand in "$HOME/.local/bin/$_name" "/opt/homebrew/bin/$_name" "/usr/local/bin/$_name" \
+      "$([ "$_name" = "codex" ] && printf '/Applications/ChatGPT.app/Contents/Resources/codex')" \
+      "$([ "$_name" = "agy" ] && printf "$HOME/.antigravity/antigravity/bin/agy")"; do
+      if [ -n "$_cand" ] && [ -x "$_cand" ]; then
+        _p="$_cand"
+        break
+      fi
+    done
+  fi
+  printf '%s' "$_p"
+}
+
+prepare_alt_cli_workspace() {
+  local _dir="$1" _cli="$2"
+  [ -d "$_dir" ] || return 0
+  if [ -e "$INSTALL_DIR/CLAUDE.md" ]; then
+    ln -sf "$INSTALL_DIR/CLAUDE.md" "$_dir/AGENTS.md" 2>/dev/null || true
+    ln -sf "$INSTALL_DIR/CLAUDE.md" "$_dir/GEMINI.md" 2>/dev/null || true
+  fi
+  if command -v node >/dev/null 2>&1 && [ -f "$INSTALL_DIR/dist/cli-detector.js" ]; then
+    node -e "import(process.argv[1]).then(m=>m.prepareWorkspaceForCli(process.argv[2], process.argv[3]))" "$INSTALL_DIR/dist/cli-detector.js" "$_dir" "$_cli" 2>/dev/null || true
+  fi
+}
+
 _resolve_main_model_raw() {
   if [ -n "${MAIN_AGENT_MODEL:-}" ]; then
     printf '%s' "$MAIN_AGENT_MODEL"
@@ -1185,14 +1240,24 @@ claude_native_update() {
 marveen_in_docker() {
   [ -f "$INSTALL_DIR/.env" ] && grep -qx 'MARVEEN_DEPLOYMENT=docker' "$INSTALL_DIR/.env"
 }
+MAIN_MODEL="$(resolve_main_model)"
+MAIN_CLI_TYPE="$(resolve_main_cli_type "$MAIN_MODEL")"
+RAW_MAIN_MODEL="$(strip_cli_model_prefix "$MAIN_MODEL")"
+
 if marveen_in_docker; then
-  command -v claude >/dev/null 2>&1 \
-    || echo "$(date '+%F %T') claude MISSING in the container: the image is broken (no self-heal install in Docker mode)" >&2
-  echo "$(date '+%F %T') claude update SKIPPED: Docker mode, the image owns the version" >&2
-elif ! command -v claude >/dev/null 2>&1; then
-  if ! claude_relink_native; then
-    claude_install "binary missing -- self-heal"
+  if [ "$MAIN_CLI_TYPE" = "claude" ]; then
+    command -v claude >/dev/null 2>&1 \
+      || echo "$(date '+%F %T') claude MISSING in the container: the image is broken (no self-heal install in Docker mode)" >&2
+    echo "$(date '+%F %T') claude update SKIPPED: Docker mode, the image owns the version" >&2
   fi
+elif ! command -v claude >/dev/null 2>&1; then
+  if [ "$MAIN_CLI_TYPE" = "claude" ]; then
+    if ! claude_relink_native; then
+      claude_install "binary missing -- self-heal"
+    fi
+  fi
+elif [ "$MAIN_CLI_TYPE" != "claude" ]; then
+  :
 elif claude_is_native; then
   claude_native_behind_npm_note
   if [ "$AVX_LESS" = "0" ] && claude_native_autoupdate_on \
@@ -1209,9 +1274,17 @@ elif [ "$AVX_LESS" = "0" ] && [ -z "$(find "$CLAUDE_UPDATE_STAMP" -mtime -1 2>/d
   DAILY_CLAUDE_CHECK=1
 fi
 
-CLAUDE="$(command -v claude)"
+CLAUDE="$(command -v claude 2>/dev/null || true)"
+CODEX_BIN="$(resolve_cli_bin codex)"
+AGY_BIN="$(resolve_cli_bin agy)"
 TMUX="$(command -v tmux)"
-[ -z "$CLAUDE" ] && echo "ERROR: claude not found on PATH" >&2 && exit 1
+if [ "$MAIN_CLI_TYPE" = "codex" ]; then
+  [ -z "$CODEX_BIN" ] && echo "ERROR: codex not found on PATH" >&2 && exit 1
+elif [ "$MAIN_CLI_TYPE" = "agy" ]; then
+  [ -z "$AGY_BIN" ] && echo "ERROR: agy not found on PATH" >&2 && exit 1
+else
+  [ -z "$CLAUDE" ] && echo "ERROR: claude not found on PATH" >&2 && exit 1
+fi
 [ -z "$TMUX" ]   && echo "ERROR: tmux not found on PATH" >&2 && exit 1
 
 # MCP startup-batch tuning for the MAIN session (2026-06-26).
@@ -1248,11 +1321,18 @@ MCP_BATCH_ENV="export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DIS
 # .claude/settings.json (tracked, shipped with the repo). Without the .env
 # route an install that wants a different model has to edit a tracked file,
 # which then blocks the update preflight and gets reverted by the next update.
-MAIN_MODEL="$(resolve_main_model)"
-MODEL_FLAG=""
 # Single-quote the model id so values like `claude-opus-4-8[1m]` survive the
 # tmux command-string round-trip without the inner shell glob-expanding `[1m]`.
-[ -n "$MAIN_MODEL" ] && MODEL_FLAG="--model $(sh_single_quote "$MAIN_MODEL") "
+MODEL_FLAG=""
+CODEX_MODEL_FLAG=""
+AGY_MODEL_FLAG=""
+if [ "$MAIN_CLI_TYPE" = "codex" ]; then
+  [ -n "$RAW_MAIN_MODEL" ] && CODEX_MODEL_FLAG="-m $(sh_single_quote "$RAW_MAIN_MODEL") "
+elif [ "$MAIN_CLI_TYPE" = "agy" ]; then
+  [ -n "$RAW_MAIN_MODEL" ] && AGY_MODEL_FLAG="--model $(sh_single_quote "$RAW_MAIN_MODEL") "
+else
+  [ -n "$RAW_MAIN_MODEL" ] && MODEL_FLAG="--model $(sh_single_quote "$RAW_MAIN_MODEL") "
+fi
 
 # Main-agent config isolation (OPT-IN, default OFF).
 #
@@ -1933,24 +2013,53 @@ esac
 # the server's global environment, so every sub-agent session inherited the
 # MAIN session's channel state dir. The -g -u after the launch cleans a server
 # polluted earlier.
-# Headroom context optimizer wrapper (`headroom wrap claude --`) when installed, enabled, and not using a custom base URL.
-case "${MARVEEN_HEADROOM:-1}" in
-  0|false|FALSE|off|OFF|no|NO) ;;
-  *)
-    if [ -z "$CUSTOM_PROVIDER_ENV" ] && ! printf '%s' "$MAIN_MODEL" | grep -qE '/|^deepseek-|^minimax-'; then
+# Headroom context optimizer wrapper (`headroom wrap claude --` / `headroom wrap codex --`) when installed, enabled, and supported.
+MAIN_LAUNCH_CMD=""
+if [ "$MAIN_CLI_TYPE" = "codex" ]; then
+  prepare_alt_cli_workspace "$INSTALL_DIR" "codex"
+  _codex_cmd="$(sh_single_quote "$CODEX_BIN")"
+  case "${MARVEEN_HEADROOM:-1}" in
+    0|false|FALSE|off|OFF|no|NO) ;;
+    *)
       _hr_bin="$(command -v headroom 2>/dev/null || true)"
       [ -z "$_hr_bin" ] && [ -x "$HOME/.local/bin/headroom" ] && _hr_bin="$HOME/.local/bin/headroom"
       [ -z "$_hr_bin" ] && [ -x "$HOME/.local/share/marveen-headroom-venv/bin/headroom" ] && _hr_bin="$HOME/.local/share/marveen-headroom-venv/bin/headroom"
-      if [ -n "$_hr_bin" ]; then
-        CLAUDE="$(sh_single_quote "$_hr_bin") wrap claude --"
+      if [ -n "$_hr_bin" ] && "$_hr_bin" wrap --help 2>&1 | grep -q "codex"; then
+        _codex_cmd="$(sh_single_quote "$_hr_bin") wrap codex --"
       fi
       unset _hr_bin
-    fi
-    ;;
-esac
+      ;;
+  esac
+  MAIN_LAUNCH_CMD="${MCP_BATCH_ENV}unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${_codex_cmd} --dangerously-bypass-approvals-and-sandbox ${CODEX_MODEL_FLAG}"
+  unset _codex_cmd
+elif [ "$MAIN_CLI_TYPE" = "agy" ]; then
+  prepare_alt_cli_workspace "$INSTALL_DIR" "agy"
+  MAIN_LAUNCH_CMD="${MCP_BATCH_ENV}unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && $(sh_single_quote "$AGY_BIN") --dangerously-skip-permissions ${AGY_MODEL_FLAG}"
+else
+  case "${MARVEEN_HEADROOM:-1}" in
+    0|false|FALSE|off|OFF|no|NO) ;;
+    *)
+      if [ -z "$CUSTOM_PROVIDER_ENV" ] && ! printf '%s' "$MAIN_MODEL" | grep -qE '/|^deepseek-|^minimax-'; then
+        _hr_bin="$(command -v headroom 2>/dev/null || true)"
+        [ -z "$_hr_bin" ] && [ -x "$HOME/.local/bin/headroom" ] && _hr_bin="$HOME/.local/bin/headroom"
+        [ -z "$_hr_bin" ] && [ -x "$HOME/.local/share/marveen-headroom-venv/bin/headroom" ] && _hr_bin="$HOME/.local/share/marveen-headroom-venv/bin/headroom"
+        if [ -n "$_hr_bin" ]; then
+          CLAUDE="$(sh_single_quote "$_hr_bin") wrap claude --"
+        fi
+        unset _hr_bin
+      fi
+      ;;
+  esac
+  MAIN_LAUNCH_CMD=""
+fi
 
-env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
-  "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${AUTH_POST_ENV}${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}${CHANNELS_ARG}"
+if [ "$MAIN_CLI_TYPE" = "claude" ]; then
+  env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
+    "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${AUTH_POST_ENV}${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}${CHANNELS_ARG}"
+else
+  env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
+    "$MAIN_LAUNCH_CMD"
+fi
 # The server certainly exists now: see CHANNELSAUTHRACE923 above.
 _tmux_set_auth_globals
 # remain-on-exit: without this, if the pane's claude process dies for ANY
@@ -2025,6 +2134,10 @@ _eperm_restarted=0
 _boot_guard_s="${CHANNELS_BOOT_GUARD_S:-90}"
 case "$_boot_guard_s" in ''|*[!0-9]*|0) _boot_guard_s=90 ;; esac
 i=0
+if [ "$MAIN_CLI_TYPE" != "claude" ]; then
+  sleep 2
+  i="$_boot_guard_s"
+fi
 while [ "$i" -lt "$_boot_guard_s" ]; do
   i=$((i + 1))
   sleep 1
@@ -2051,8 +2164,14 @@ while [ "$i" -lt "$_boot_guard_s" ]; do
         # invasive change (a stable fallback dir + a seeded ~/.claude.json project
         # entry); see the PR description / card 7EB18437.
         [ -e "$INSTALL_DIR/CLAUDE.md" ] && ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
-        env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
-          "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${AUTH_POST_ENV}${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}${CHANNELS_ARG}"
+        if [ "$MAIN_CLI_TYPE" = "claude" ]; then
+          env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
+            "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${AUTH_POST_ENV}${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}${CHANNELS_ARG}"
+        else
+          prepare_alt_cli_workspace "$_CHANNELS_STARTDIR" "$MAIN_CLI_TYPE"
+          env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
+            "$MAIN_LAUNCH_CMD"
+        fi
         # See the primary new-session above: remain-on-exit keeps the pane
         # (and session) alive if claude dies early, so the scheduled relaunch
         # can always find it. This is the /tmp-fallback launch path, same fix.
@@ -2100,10 +2219,12 @@ sleep 1
 # it was the one place where a name reached the pane unchecked. The session
 # then keeps its default name, and this line says why.
 # shellcheck source=lib/main-rename.sh
-if . "$INSTALL_DIR/scripts/lib/main-rename.sh"; then
-  main_rename_send "$TMUX" "=$SESSION:" "$_bot_name" || true
-else
-  echo "$(date '+%F %T') channels.sh: scripts/lib/main-rename.sh could not be loaded -- boot /rename NOT typed, the session keeps its default name (TYPINGPATHS1114)" >&2
+if [ "$MAIN_CLI_TYPE" = "claude" ]; then
+  if . "$INSTALL_DIR/scripts/lib/main-rename.sh"; then
+    main_rename_send "$TMUX" "=$SESSION:" "$_bot_name" || true
+  else
+    echo "$(date '+%F %T') channels.sh: scripts/lib/main-rename.sh could not be loaded -- boot /rename NOT typed, the session keeps its default name (TYPINGPATHS1114)" >&2
+  fi
 fi
 unset _bot_name
 
@@ -2181,6 +2302,7 @@ plugin_child_pid() {
     fi
   done
 }
+if [ "$MAIN_CLI_TYPE" = "claude" ]; then
 (
   # GROMZONOPROVIDER1108: the Gromzo plugin runs on Node and is never in a "failed" /mcp row this unlock handles.
   [ "$CHANNEL_PROVIDER" = "gromzo" ] && exit 0
@@ -2312,6 +2434,7 @@ plugin_child_pid() {
     fi
   fi
 ) &
+fi
 
 # Bot menu setup (Telegram only; Slack uses App Manifest)
 if [ "$CHANNEL_PROVIDER" = "telegram" ]; then
@@ -2515,7 +2638,7 @@ respawn_log() {
 # amugy is kileptet ha a session eltunik). A ${SESSION}-hoz tartozo claude
 # process pid-je -- ugyanaz a lekerdezes mint a post-init unlock Check 1-e
 # feljebb.
-_watchdog_claude_pid="$({ _p="$($TMUX list-panes -t "=$SESSION:" -F '#{pane_pid}' 2>/dev/null | head -1)"; _c="$([ -n "$_p" ] && /usr/bin/pgrep -P "$_p" -x claude 2>/dev/null | head -1)"; printf '%s' "${_c:-$_p}"; })"
+_watchdog_claude_pid="$({ _p="$($TMUX list-panes -t "=$SESSION:" -F '#{pane_pid}' 2>/dev/null | head -1)"; _c=""; for _b in claude codex agy; do [ -n "$_p" ] && _c="$(/usr/bin/pgrep -P "$_p" -x "$_b" 2>/dev/null | head -1)"; [ -n "$_c" ] && break; done; printf '%s' "${_c:-$_p}"; })"
 
 # Várakozás amíg a session él
 while $TMUX has-session -t "=$SESSION:" 2>/dev/null; do
@@ -2539,10 +2662,14 @@ while $TMUX has-session -t "=$SESSION:" 2>/dev/null; do
   # live on. Re-read it every tick, or our own fresh plugin reads as foreign.
   _pane_pid_now="$($TMUX list-panes -t "=$SESSION:" -F '#{pane_pid}' 2>/dev/null | head -1)"
   if [ -n "$_pane_pid_now" ]; then
-    _child_claude_now="$(/usr/bin/pgrep -P "$_pane_pid_now" -x claude 2>/dev/null | head -1)"
+    _child_claude_now=""
+    for _b in claude codex agy; do
+      _child_claude_now="$(/usr/bin/pgrep -P "$_pane_pid_now" -x "$_b" 2>/dev/null | head -1)"
+      [ -n "$_child_claude_now" ] && break
+    done
     [ -n "$_child_claude_now" ] && _pane_pid_now="$_child_claude_now"
     unset _child_claude_now
-    _watchdog_claude_pid="$_pane_pid_now"
+    [ -n "$_pane_pid_now" ] && _watchdog_claude_pid="$_pane_pid_now"
   fi
   unset _pane_pid_now
   # GROMZONOPROVIDER1108: a gromzo-pending session is not a plugin that failed to start: no never-started budget,
@@ -2651,6 +2778,9 @@ while $TMUX has-session -t "=$SESSION:" 2>/dev/null; do
     if [ -n "$_watchdog_claude_pid" ] && /usr/bin/pgrep -P "$_watchdog_claude_pid" bun >/dev/null 2>&1; then
       _plugin_alive=true
     fi
+  fi
+  if [ "$MAIN_CLI_TYPE" != "claude" ] && ! pane_dead_detected "$SESSION"; then
+    _plugin_alive=true
   fi
 
   if [ "$_plugin_alive" = "true" ]; then

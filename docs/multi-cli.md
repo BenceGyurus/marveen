@@ -112,3 +112,15 @@ A Marveen natívan integrálja a [Headroom](https://github.com/headroomlabs-ai/h
 - **MCP regisztráció (`headroom mcp serve`):** A `prepareWorkspaceForCli` és a worker indítás automatikusan regisztrálja a `headroom mcp serve` MCP-szervert a megfelelő konfigurációba (`claude`: `.mcp.json`, `codex`: `~/.codex/config.toml` `[mcp_servers.headroom]`, `agy`: `~/.gemini/antigravity/mcp_config.json`) szimlink-védelemmel, `0o600` jogosultsággal és az API-kulcsokat / tokeneket kiszűrő `env` másolással.
 - **Folyamatkövetés (`liveness.ts` & `channels.sh`):** A watchdog és a channel monitor a `headroom` wrapper folyamaton keresztül is automatikusan megtalálja az alatta futó `claude`/`codex`/`agy` gyermekfolyamatot.
 - **Diagnosztika (`GET /api/models/available`):** A válasz `headroom` objektumban (`available`, `enabled`, `binPath`, `version`, `wrapTargets`) jelzi a Headroom állapotát.
+
+---
+
+## 🧠 Codex / Antigravity mint fő orchestrator (Marveen — Claude Code nélkül)
+
+A Codex (`codex:*`) és a Google Antigravity (`agy:*`) nemcsak alügynökként vagy worker-ként, hanem teljes értékű **fő orchestratorként** is futtatható Claude Code telepítése vagy előfizetése nélkül:
+
+- **Váltás Dashboardról vagy `.env`-ből:** A Marveen részletező panel Beállítások fülén (`PUT /api/marveen/model`) közvetlenül átállítható a fő orchestrator modell (`MAIN_AGENT_MODEL`), és a szolgáltatás újraindul az új CLI-vel.
+- **Teljes Telegram kétirányú kapcsolat Claude `--channels` nélkül:**
+  - **Bejövő (`marveen-channel-coordinator`):** Amikor a fő munkamenet `codex` vagy `agy`, a `decideHasPluginAlive()` felismeri, hogy nincs natív Claude plugin, ezért a koordinátor automatikusan átveszi a Telegram `getUpdates` pollingot és `[CHANNEL-INBOUND]` formában injektálja a gazda üzeneteit az orchestrator tmux paneljébe.
+  - **Kimenő (`scripts/channel-reply-mcp.mjs` → `telegram_reply`):** A `syncCliMcpConfig()` automatikusan beregisztrálja a zéró-titok stdio `marveen_telegram` MCP-szervert a Codex `~/.codex/config.toml` és az Antigravity `~/.gemini/antigravity/mcp_config.json` konfigurációjába (a `TELEGRAM_BOT_TOKEN` futásidőben kizárólag a Node-folyamaton belül olvasódik ki, nem kerül sem config-fájlba, sem parancssori argumentumokba).
+- **Claude-mentes telepítés (`install-macos.sh`, `install-linux.sh`):** Telepítéskor interaktívan (vagy `MARVEEN_ORCHESTRATOR=codex|agy` környezeti változóval) kiválasztható fő orchestratorként a Codex vagy az Antigravity — ebben az esetben a telepítő kihagyja a kötelező Claude Code telepítést és OAuth belépést.

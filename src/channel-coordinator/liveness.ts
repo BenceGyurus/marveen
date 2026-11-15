@@ -183,7 +183,9 @@ export function decideHasPluginAlive(ctx: PluginAliveContext): boolean {
   }
 
   const rootCmd = cmdOf.get(claudePid) || ''
-  if (/(?:^|\/)(?:codex|agy)(?:\s|$)/.test(rootCmd)) return true
+  // Codex and Antigravity do not run Claude Code's native --channels poller plugin;
+  // returning false lets channel-coordinator enter BACKFILLING and deliver Telegram inbound.
+  if (/(?:^|\/)(?:codex|agy)(?:\s|$)/.test(rootCmd)) return false
 
   const stack = [claudePid]
   const seen = new Set<number>()

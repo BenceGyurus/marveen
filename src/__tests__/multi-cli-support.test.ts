@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -29,6 +29,9 @@ import {
   firstRunAcceptKeys,
 } from '../pane-state.js'
 import { buildRemoteLaunchCommand } from '../web/ssh-tmux.js'
+import { buildMainSessionRespawnCmd } from '../web/channel-monitor.js'
+import { mainConfigDecisionForTest } from '../web/main-config-decision.js'
+import { decideHasPluginAlive } from '../channel-coordinator/liveness.js'
 import {
   findAltCliTranscriptForWorkingDir,
   readAltCliActiveModel,
@@ -583,6 +586,133 @@ describe('headroom integration: launcher, MCP config sync, and sandboxed install
       expect(venvOut).toContain('Headroom telepitve')
       expect(readFileSync(pipLog, 'utf-8')).toContain('headroom-ai[all]')
       expect(existsSync(join(venvHome, '.local', 'bin', 'headroom'))).toBe(true)
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('non-Claude orchestrator (codex / agy): liveness, marveen_telegram MCP stdio server & respawn commands', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'marveen-orch-cli-'))
+    try {
+      // 1. Coordinator liveness returns false for codex/agy main panes so backfill delivers inbound Telegram
+      expect(decideHasPluginAlive({
+        psOutput: '  PID  PPID COMMAND\n 1001 1000 codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.4\n',
+        claudePid: 1001,
+        providerType: 'telegram',
+        botPid: null,
+        isPidAlive: () => true,
+      })).toBe(false)
+      expect(decideHasPluginAlive({
+        psOutput: '  PID  PPID COMMAND\n 1002 1000 /opt/bin/agy --dangerously-skip-permissions --model gemini-3-pro-high\n',
+        claudePid: 1002,
+        providerType: 'telegram',
+        botPid: null,
+        isPidAlive: () => true,
+      })).toBe(false)
+
+      // 2. syncCliMcpConfig registers zero-secret marveen_telegram when scripts/channel-reply-mcp.mjs exists next to mcpJsonPath
+      const fakeHome = join(tmp, 'home')
+      const fakeWorkspace = join(tmp, 'ws')
+      const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+      const realBridge = join(repoRoot, 'scripts', 'channel-reply-mcp.mjs')
+      expect(existsSync(realBridge)).toBe(true)
+
+      mkdirSync(fakeHome, { recursive: true })
+      mkdirSync(join(fakeWorkspace, 'scripts'), { recursive: true })
+      copyFileSync(realBridge, join(fakeWorkspace, 'scripts', 'channel-reply-mcp.mjs'))
+      const mcpJsonPath = join(fakeWorkspace, '.mcp.json')
+      writeFileSync(mcpJsonPath, JSON.stringify({ mcpServers: {} }, null, 2))
+
+      const origEnv = { ...process.env }
+      process.env.PATH = `${join(tmp, 'empty-bin')}:/usr/bin:/bin`
+      try {
+        expect(syncCliMcpConfig('codex', mcpJsonPath, { homeDir: fakeHome })).toBe(true)
+        const toml = readFileSync(join(fakeHome, '.codex', 'config.toml'), 'utf-8')
+        expect(toml).toContain('[mcp_servers.marveen_telegram]')
+        expect(toml).toContain('channel-reply-mcp.mjs')
+        expect(toml).not.toContain('TELEGRAM_BOT_TOKEN')
+
+        expect(syncCliMcpConfig('agy', mcpJsonPath, { homeDir: fakeHome })).toBe(true)
+        const agyCfg = JSON.parse(readFileSync(join(fakeHome, '.gemini', 'antigravity', 'mcp_config.json'), 'utf-8'))
+        expect(agyCfg.mcpServers.marveen_telegram.args).toContain(join(fakeWorkspace, 'scripts', 'channel-reply-mcp.mjs'))
+        expect(JSON.stringify(agyCfg)).not.toContain('TELEGRAM_BOT_TOKEN')
+      } finally {
+        process.env = origEnv
+      }
+
+      // 3. JSON-RPC initialize + tools/list smoke test on real scripts/channel-reply-mcp.mjs
+      const rpcInput = [
+        JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {} } }),
+        JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+        JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+      ].join('\n') + '\n'
+      const rpcOut = spawnSync(process.execPath, [realBridge], {
+        input: rpcInput,
+        encoding: 'utf-8',
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: fakeHome },
+        timeout: 5000,
+      })
+      expect(rpcOut.status).toBe(0)
+      const replies = rpcOut.stdout.trim().split('\n').map((l) => JSON.parse(l))
+      expect(replies.some((r) => r.id === 1 && r.result?.serverInfo?.name === 'marveen_telegram')).toBe(true)
+      expect(replies.some((r) => r.id === 2 && r.result?.tools?.some((t: { name: string }) => t.name === 'telegram_reply'))).toBe(true)
+
+      // 4. buildMainSessionRespawnCmd builds clean Codex & Agy orchestrator commands without Claude flags/secrets
+      const fakeBin = join(tmp, 'bin')
+      mkdirSync(fakeBin, { recursive: true })
+      const fakeHr = join(fakeBin, 'headroom')
+      writeFileSync(
+        fakeHr,
+        '#!/usr/bin/env bash\nif [ "$1" = "wrap" ] && [ "$2" = "--help" ]; then echo "Usage: headroom wrap [claude|codex]"; exit 0; fi\nexit 0\n',
+      )
+      chmodSync(fakeHr, 0o755)
+      const savedPath = process.env.PATH
+      const savedHrBin = process.env.MARVEEN_HEADROOM_BIN
+      process.env.PATH = `${fakeBin}:${savedPath ?? '/usr/bin:/bin'}`
+      process.env.MARVEEN_HEADROOM_BIN = fakeHr
+      try {
+        const codexFresh = buildMainSessionRespawnCmd({
+          claudePath: '/nonexistent/claude',
+          codexPath: '/usr/local/bin/codex',
+          pluginId: 'telegram@claude-plugins-official',
+          model: 'codex:gpt-5.4',
+          continueSession: false,
+          config: mainConfigDecisionForTest(),
+          channelStateEnv: { name: 'TELEGRAM_STATE_DIR', dir: join(tmp, 'state') },
+        })
+        expect(codexFresh).toContain('unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY')
+        expect(codexFresh).toContain('wrap codex --')
+        expect(codexFresh).toContain("--dangerously-bypass-approvals-and-sandbox -m 'gpt-5.4'")
+        expect(codexFresh).not.toContain('--channels')
+
+        const codexResume = buildMainSessionRespawnCmd({
+          claudePath: '/nonexistent/claude',
+          codexPath: '/usr/local/bin/codex',
+          pluginId: 'telegram@claude-plugins-official',
+          model: 'codex:gpt-5.4',
+          continueSession: true,
+          config: mainConfigDecisionForTest(),
+          channelStateEnv: { name: 'TELEGRAM_STATE_DIR', dir: join(tmp, 'state') },
+        })
+        expect(codexResume).toContain('resume --last --dangerously-bypass-approvals-and-sandbox')
+
+        const agyCmd = buildMainSessionRespawnCmd({
+          claudePath: '/nonexistent/claude',
+          agyPath: '/usr/local/bin/agy',
+          pluginId: 'telegram@claude-plugins-official',
+          model: 'agy:gemini-3-pro-high',
+          continueSession: true,
+          config: mainConfigDecisionForTest(),
+          channelStateEnv: { name: 'TELEGRAM_STATE_DIR', dir: join(tmp, 'state') },
+        })
+        expect(agyCmd).toContain('unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY')
+        expect(agyCmd).toContain("/usr/local/bin/agy --continue --dangerously-skip-permissions --model 'gemini-3-pro-high'")
+        expect(agyCmd).not.toContain('--channels')
+      } finally {
+        process.env.PATH = savedPath
+        if (savedHrBin === undefined) delete process.env.MARVEEN_HEADROOM_BIN
+        else process.env.MARVEEN_HEADROOM_BIN = savedHrBin
+      }
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }

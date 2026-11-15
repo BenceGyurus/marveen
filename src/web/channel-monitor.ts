@@ -1,5 +1,6 @@
 import { tmuxStderr } from './tmux-stderr.js'
 import { writeMainExtraPluginsSettings } from './main-extra-plugins-settings.js'
+import { getCliTypeForModel, stripCliModelPrefix, prepareWorkspaceForCli, resolveHeadroomLauncher, type CliType } from '../cli-detector.js'
 import { decideSkipTrace, decideMenuPassTrace, type SkipTraceState } from './monitor-trace.js'
 import { releaseOwnRespawnStamp, type OwnRespawnStamp } from './respawn-stamp-release.js'
 import { existsSync, readFileSync, statSync, writeFileSync, utimesSync } from 'node:fs'
@@ -102,6 +103,12 @@ import { gromzoTokenExport, gromzoTokenFile } from './agent-extra-channels.js'
 // mirrors the pattern already used in agent-process.ts.
 const tmuxBin = makeLazyBinResolver('tmux')
 const claudeBin = makeLazyBinResolver('claude')
+const codexBin = makeLazyBinResolver('codex')
+const agyBin = makeLazyBinResolver('agy')
+
+function mainOrchestratorCliType(): CliType {
+  return getCliTypeForModel(readConfiguredMainModel())
+}
 // Resolves a token-mode plan's vault secret to its plaintext value at launch
 // time, inside the respawned session's own shell -- see
 // buildMainSessionRespawnCmd's tokenSecretId branch. Never invoked from THIS
@@ -1142,6 +1149,8 @@ function mainLaunchPluginIds(provider: { type: string; pluginId: string }): stri
 
 export function buildMainSessionRespawnCmd(opts: {
   claudePath: string
+  codexPath?: string
+  agyPath?: string
   pluginId: string
   model: string
   continueSession: boolean
@@ -1221,9 +1230,24 @@ export function buildMainSessionRespawnCmd(opts: {
     : null
   const channelsList = [...(primary ? [`plugin:${primary}`] : []), ...extras.map((p) => `plugin:${p}`)]
   const gromzoToken = gromzoSlug ? gromzoTokenExport(opts.gromzoTokenFile !== undefined ? opts.gromzoTokenFile : gromzoTokenFile(gromzoSlug)) : ''
+  // FLEETVENV923: same venv-first PATH as startAgentProcess and channels.sh (kept as one template line for launch-path-venv-pin).
+  const venvPathLine = `export PATH="${fleetVenvPathPrefix()}/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"`
+  const cliType = getCliTypeForModel(opts.model)
+  if (cliType === 'codex' || cliType === 'agy') {
+    const cleanModel = stripCliModelPrefix(opts.model)
+    const launcher = cliType === 'codex'
+      ? `${resolveHeadroomLauncher('codex', opts.codexPath || codexBin())} ${opts.continueSession ? 'resume --last ' : ''}--dangerously-bypass-approvals-and-sandbox${cleanModel ? ` -m ${shSingleQuote(cleanModel)}` : ''}`
+      : `${resolveHeadroomLauncher('agy', opts.agyPath || agyBin())} ${opts.continueSession ? '--continue ' : ''}--dangerously-skip-permissions${cleanModel ? ` --model ${shSingleQuote(cleanModel)}` : ''}`
+    return [
+      venvPathLine,
+      '&& export CLAUDE_CODE_DISABLE_AGENT_VIEW=1',
+      `&& ${ROOT_SANDBOX_ENV}`,
+      '&& unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY',
+      `&& ${launcher}`,
+    ].join(' ')
+  }
   return [
-    // FLEETVENV923: same venv-first PATH as startAgentProcess and channels.sh.
-    `export PATH="${fleetVenvPathPrefix()}/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"`,
+    venvPathLine,
     `&& export ${opts.channelStateEnv.name}=${shSingleQuote(opts.channelStateEnv.dir)}`,
     // MCP startup-batch tuning (parity with channels.sh + startAgentProcess):
     // the --channels plugin is a stdio MCP server; the main session runs the
@@ -1363,17 +1387,25 @@ export function respawnMainSessionFresh(): void {
     } catch (err) {
       logger.warn({ err }, 'respawnMainSessionFresh: detached-claude reap failed (continuing)')
     }
-    ensureSharedClaudeOnboarded()
+    const mainModel = readConfiguredMainModel()
+    const mainCliType = getCliTypeForModel(mainModel)
+    if (mainCliType === 'claude') {
+      ensureSharedClaudeOnboarded()
+    } else {
+      prepareWorkspaceForCli(PROJECT_ROOT, mainCliType)
+    }
 
     const claudeCmd = buildMainSessionRespawnCmd({
-      claudePath: claudeBin(),
+      claudePath: mainCliType === 'claude' ? claudeBin() : 'claude',
+      codexPath: mainCliType === 'codex' ? codexBin() : undefined,
+      agyPath: mainCliType === 'agy' ? agyBin() : undefined,
       pluginId: provider.pluginId,
       extraPluginIds: readExtraChannelPluginIds(),
       mainAgentId: readMainAgentIdRaw(),
       channelConfigured: mainPrimaryConfigured(provider.type),
       extraSettingsPath: writeMainExtraPluginsSettings(PROJECT_ROOT, mainLaunchPluginIds(provider)),
       channelStateEnv: mainChannelStateEnv(provider.type),
-      model: readConfiguredMainModel(),
+      model: mainModel,
       // The main session always starts a new conversation -- this is the whole
       // point of the nightly restart (drop the accumulated context).
       continueSession: false,
@@ -1414,8 +1446,10 @@ export function respawnMainSessionFresh(): void {
     // identity nor a guaranteed-loaded channel plugin. Both follow-ups mirror the
     // resume path; skipping them is how a restarted session comes back nameless
     // or with the plugin stuck in `◯ disabled`.
-    void scheduleIdentitySetup(MAIN_CHANNELS_SESSION, BOT_NAME)
-    schedulePluginUnlockAfterRespawn(MAIN_CHANNELS_SESSION, provider.type)
+    if (mainOrchestratorCliType() === 'claude') {
+      void scheduleIdentitySetup(MAIN_CHANNELS_SESSION, BOT_NAME)
+      schedulePluginUnlockAfterRespawn(MAIN_CHANNELS_SESSION, provider.type)
+    }
   } finally {
     endRespawn()
   }
@@ -1472,17 +1506,25 @@ export async function resumeMarveenSession(opts: { byMonitor?: boolean } = {}): 
     // A respawn onto the shared ~/.claude parks on the first-run "Select login
     // method" picker when ~/.claude.json lost hasCompletedOnboarding (2026-07-15
     // bootcamp mass-"/login"); idempotent re-seed before every respawn.
-    ensureSharedClaudeOnboarded()
+    const mainModel = readConfiguredMainModel()
+    const mainCliType = getCliTypeForModel(mainModel)
+    if (mainCliType === 'claude') {
+      ensureSharedClaudeOnboarded()
+    } else {
+      prepareWorkspaceForCli(PROJECT_ROOT, mainCliType)
+    }
 
     const claudeCmd = buildMainSessionRespawnCmd({
-      claudePath: claudeBin(),
+      claudePath: mainCliType === 'claude' ? claudeBin() : 'claude',
+      codexPath: mainCliType === 'codex' ? codexBin() : undefined,
+      agyPath: mainCliType === 'agy' ? agyBin() : undefined,
       pluginId: provider.pluginId,
       extraPluginIds: readExtraChannelPluginIds(),
       mainAgentId: readMainAgentIdRaw(),
     channelConfigured: mainPrimaryConfigured(provider.type),
     extraSettingsPath: writeMainExtraPluginsSettings(PROJECT_ROOT, mainLaunchPluginIds(provider)),
       channelStateEnv: mainChannelStateEnv(provider.type),
-      model: readConfiguredMainModel(),
+      model: mainModel,
       continueSession: true,
       // Parity with channels.sh: a recovery respawn must also land on the
       // isolated CLAUDE_CONFIG_DIR (macOS), else it re-authenticates from the
@@ -1526,21 +1568,11 @@ export async function resumeMarveenSession(opts: { byMonitor?: boolean } = {}): 
     // start). /remote-control was dropped (the operator no longer uses it).
     // scheduleIdentitySetup only SCHEDULES delayed timers and returns immediately;
     // fire-and-forget (void) is correct here -- there is nothing to await.
-    void scheduleIdentitySetup(MAIN_CHANNELS_SESSION, BOT_NAME)
-    // channels.sh runs an /mcp+Up+Enter+Enter unlock probe after launching
-    // the main session to revive a Failed/disabled channel plugin (#231/#232),
-    // but THIS code path skips channels.sh entirely - tmux respawn-pane is
-    // direct. Schedule the same probe in-process so the plugin doesn't get
-    // stuck in `◯ disabled` after an in-process respawn (2026-06-01 18:55).
-    schedulePluginUnlockAfterRespawn(MAIN_CHANNELS_SESSION, provider.type)
-    // Post-resume guard (CC 2.1.193 regression). A --continue resume can come up
-    // WITHOUT the --channels plugin (absent from /mcp, no poller -> deaf main
-    // channel). The unlock probe above only revives a Failed/disabled plugin --
-    // it cannot help when the plugin never loaded at all. Schedule a liveness
-    // probe; if the plugin is still missing after the settle, escalate straight
-    // to a FRESH respawn instead of burning the full RESUME_GRACE_MS cascade.
-    // Context is dropped only in the bad case; a clean --continue keeps it.
-    schedulePostResumePluginGuard(provider.type)
+    if (mainOrchestratorCliType() === 'claude') {
+      void scheduleIdentitySetup(MAIN_CHANNELS_SESSION, BOT_NAME)
+      schedulePluginUnlockAfterRespawn(MAIN_CHANNELS_SESSION, provider.type)
+      schedulePostResumePluginGuard(provider.type)
+    }
     // Stamp the shared respawn timestamp so lastMainRespawnAt() sees this
     // respawn from any caller (down-cascade stage 3, stuck-tool-call-watcher,
     // external systemd-timer watchdog). Without it the watcher cannot defer
@@ -1783,17 +1815,24 @@ function respawnMarveenSessionFresh(): boolean {
   // end (see main-respawn-hold.ts); the finally clears it on every exit.
   const endRespawn = beginMainRespawn()
   try {
-    // Same first-run-picker guard as resumeMarveenSession.
-    ensureSharedClaudeOnboarded()
+    const mainModel = readConfiguredMainModel()
+    const mainCliType = getCliTypeForModel(mainModel)
+    if (mainCliType === 'claude') {
+      ensureSharedClaudeOnboarded()
+    } else {
+      prepareWorkspaceForCli(PROJECT_ROOT, mainCliType)
+    }
     const claudeCmd = buildMainSessionRespawnCmd({
-      claudePath: claudeBin(),
+      claudePath: mainCliType === 'claude' ? claudeBin() : 'claude',
+      codexPath: mainCliType === 'codex' ? codexBin() : undefined,
+      agyPath: mainCliType === 'agy' ? agyBin() : undefined,
       pluginId: provider.pluginId,
       extraPluginIds: readExtraChannelPluginIds(),
       mainAgentId: readMainAgentIdRaw(),
     channelConfigured: mainPrimaryConfigured(provider.type),
     extraSettingsPath: writeMainExtraPluginsSettings(PROJECT_ROOT, mainLaunchPluginIds(provider)),
       channelStateEnv: mainChannelStateEnv(provider.type),
-      model: readConfiguredMainModel(),
+      model: mainModel,
       continueSession: false,
       // Same channels.sh-bypass concern as resumeMarveenSession: this fresh
       // respawn also skips channels.sh, so it must carry the isolated config
@@ -1803,16 +1842,11 @@ function respawnMarveenSessionFresh(): boolean {
     execFileSync(tmuxBin(), ['respawn-pane', '-k', '-t', exactTmuxTarget(MAIN_CHANNELS_SESSION), claudeCmd], { timeout: 15000 })
     // MXDAGENTSOCKID1106 (b): the old claude's gromzo plugin outlives it (it ignores a closed stdin); sweep it once the respawn landed.
     scheduleGromzoOrphanReap('main-respawn', tmuxBin())
-    logger.warn({ provider: provider.type }, 'Hard restart: marveen session respawned fresh (no --continue)')
-    // Re-establish /rename on the fresh process (see note in resumeMarveenSession).
-    // scheduleIdentitySetup only schedules delayed timers -> fire-and-forget.
-    void scheduleIdentitySetup(MAIN_CHANNELS_SESSION, BOT_NAME)
-    // Same channels.sh-bypass concern as in resumeMarveenSession: this respawn
-    // path does NOT invoke channels.sh, so the post-init plugin unlock probe
-    // (#231/#232) never runs. Wire it in-process so the keep-alive-watchdog
-    // fresh-respawn path also revives a Failed/disabled plugin instead of
-    // leaving the channel offline until manual intervention.
-    schedulePluginUnlockAfterRespawn(MAIN_CHANNELS_SESSION, provider.type)
+    logger.warn({ provider: provider.type, cliType: mainCliType }, 'Hard restart: marveen session respawned fresh (no --continue)')
+    if (mainCliType === 'claude') {
+      void scheduleIdentitySetup(MAIN_CHANNELS_SESSION, BOT_NAME)
+      schedulePluginUnlockAfterRespawn(MAIN_CHANNELS_SESSION, provider.type)
+    }
     writeRespawnStamp() // coordinate with the systemd-timer watchdog (covers the keepalive path too)
     return true
   } catch (err) {
@@ -1868,6 +1902,7 @@ export function shouldEscalateAfterResume(f: { claudePid: number | null; pluginA
 // respawn stamp, so lastMainRespawnAt() suppresses the down-cascade's redundant
 // stage-4 hard restart during the ensuing cold boot.
 function schedulePostResumePluginGuard(provider: ChannelProviderType): void {
+  if (mainOrchestratorCliType() !== 'claude') return
   setTimeout(() => {
     try {
       const claudePid = getClaudePidForSession(MAIN_CHANNELS_SESSION)
@@ -2432,6 +2467,7 @@ function refreshKeepaliveFromInbound(): void {
 }
 
 function checkMainKeepaliveStaleness(): void {
+  if (mainOrchestratorCliType() !== 'claude') return
   // SAFETY NET first: let any fresh inbound traffic warm the file before we
   // judge staleness, so a busy-but-alive session is never seen as stale-deaf.
   refreshKeepaliveFromInbound()
@@ -3151,6 +3187,10 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         }
         continue
       }
+      if (t.isMarveen && mainOrchestratorCliType() !== 'claude') {
+        handleMarveenUp()
+        continue
+      }
       if (t.isMarveen) mainUnconfiguredNoted = false
       const liveness = await probeChannelPluginLivenessAsync(claudePid, t.provider, t.agentName, { confirmAlive: openDownSpell }, sweepSnapshot ?? undefined)
       if (liveness === 'unknown') {
@@ -3483,6 +3523,7 @@ let mainFirstWaitLogged = false
 function mainSessionChannelsReady(): boolean {
   const claudePid = getClaudePidForSession(MAIN_CHANNELS_SESSION)
   if (claudePid == null) return false
+  if (mainOrchestratorCliType() !== 'claude') return true
   const primary = getMainAgentProvider()
   if (probeChannelPluginLiveness(claudePid, primary) !== 'alive') return false
   const extras = colistenProviders(primary, readExtraChannelPluginIds(), ALL_PROVIDER_TYPES.map((t) => getProvider(t)))

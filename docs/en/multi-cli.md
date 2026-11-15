@@ -79,3 +79,15 @@ Marveen automatically integrates [Headroom](https://github.com/headroomlabs-ai/h
 - **Zero-Secret MCP Registration (`headroom mcp serve`):** `syncCliMcpConfig()` automatically registers `headroom mcp serve` into Claude's `.mcp.json`, Codex's `~/.codex/config.toml` (`[mcp_servers.headroom]`), and Antigravity's `~/.gemini/antigravity/mcp_config.json` with symlink refusal, `0o600` file permissions, and secret/token stripping for forwarded MCP server env vars.
 - **Process Tree Liveness (`liveness.ts` & `scripts/channels.sh`):** Watchdog and channel liveness checks traverse through `headroom` wrapper parent PIDs to track the underlying `claude`/`codex`/`agy` child processes.
 - **Status Exposure (`GET /api/models/available`):** Includes a `headroom` object (`available`, `enabled`, `binPath`, `version`, `wrapTargets`).
+
+---
+
+## 🧠 Running Codex or Antigravity as Main Orchestrator (No Claude Code Required)
+
+Both OpenAI Codex (`codex:*`) and Google Antigravity (`agy:*`) can operate not only as sub-agents or background workers, but as the **main Marveen orchestrator** even on hosts without Claude Code installed:
+
+- **Dashboard & `.env` Switcher:** Choose any `claude`, `codex:*`, or `agy:*` model directly from the Marveen Settings tab (`PUT /api/marveen/model`), which updates `MAIN_AGENT_MODEL` in `.env`, prepares workspace trust/MCP configs, and restarts the main session.
+- **Bidirectional Telegram Without Claude `--channels`:**
+  - **Inbound (`marveen-channel-coordinator`):** `decideHasPluginAlive()` detects when `codex` or `agy` leads the main tmux pane and activates coordinator backfill polling so incoming Telegram messages arrive as `[CHANNEL-INBOUND]` prompts.
+  - **Outbound (`scripts/channel-reply-mcp.mjs` → `telegram_reply`):** `syncCliMcpConfig()` automatically registers the zero-secret `marveen_telegram` stdio MCP server in `~/.codex/config.toml` and `~/.gemini/antigravity/mcp_config.json` (reading `TELEGRAM_BOT_TOKEN` internally inside Node from `.env`/state dirs without exposing secrets in configs or argv).
+- **Claude-Free Installers (`install-macos.sh`, `install-linux.sh`):** Interactive selection (or `MARVEEN_ORCHESTRATOR=codex|agy`) allows installing Marveen with Codex or Antigravity as the primary CLI while skipping Claude Code install and OAuth requirements.

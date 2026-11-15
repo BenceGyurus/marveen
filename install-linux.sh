@@ -183,6 +183,12 @@ trap 'on_error $LINENO' ERR
 # into ~/.bashrc. The installer therefore believed auth was done, skipped the
 # token capture, and left the services with nothing.
 service_auth_present() {
+  if grep -qE '^MAIN_AGENT_MODEL=(codex|agy):' "$INSTALL_DIR/.env" 2>/dev/null; then
+    return 0
+  fi
+  if [ "${ORCH_CLI:-claude}" = "codex" ] || [ "${ORCH_CLI:-claude}" = "agy" ]; then
+    return 0
+  fi
   grep -qE '^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=.+' "$INSTALL_DIR/.env" 2>/dev/null && return 0
   [ -s "$INSTALL_DIR/store/.claude-oauth-token" ] && return 0
   return 1
@@ -1017,7 +1023,66 @@ _install_bun() {
 # scripts/channels.sh and scripts/fix-avx.sh (a test pins the three together).
 CLAUDE_PIN="2.1.112"
 
-if _claude_runs; then
+# Fo orchestrator CLI valasztasa (Claude / Codex / Antigravity)
+ORCH_CLI="${MARVEEN_ORCHESTRATOR:-}"
+ORCH_DEFAULT_MODEL="${MARVEEN_MAIN_MODEL:-}"
+if [ -z "$ORCH_CLI" ] && [ -f "$INSTALL_DIR/.env" ]; then
+  _env_main_model="$(grep -E '^MAIN_AGENT_MODEL=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+  case "$_env_main_model" in
+    codex:*) ORCH_CLI="codex" ;;
+    agy:*)   ORCH_CLI="agy" ;;
+  esac
+fi
+if [ -z "$ORCH_CLI" ] && [ -t 0 ]; then
+  echo ""
+  echo -e "  ${BOLD}Melyik AI CLI legyen a fo orchestrator (Marveen)?${NC}"
+  echo -e "    ${BOLD}1)${NC} Claude Code (alapertelmezett)"
+  echo -e "    ${BOLD}2)${NC} OpenAI Codex CLI (codex — Claude Code nelkul is mukodik)"
+  echo -e "    ${BOLD}3)${NC} Google Antigravity CLI (agy — Claude Code nelkul is mukodik)"
+  read -rp "  Valasztas [1]: " _orch_choice
+  case "${_orch_choice:-1}" in
+    2|codex|CODEX) ORCH_CLI="codex" ;;
+    3|agy|AGY|antigravity) ORCH_CLI="agy" ;;
+    *) ORCH_CLI="claude" ;;
+  esac
+fi
+ORCH_CLI="${ORCH_CLI:-claude}"
+case "$ORCH_CLI" in
+  codex)
+    ORCH_DEFAULT_MODEL="${ORCH_DEFAULT_MODEL:-codex:gpt-5.4}"
+    if ! command -v codex >/dev/null 2>&1; then
+      echo -e "  OpenAI Codex CLI telepitese (@openai/codex)..."
+      ensure_global_npm_writable auto || true
+      if [ "${NPM_NEEDS_SUDO:-}" = "1" ]; then
+        sudo npm install -g @openai/codex </dev/null >/dev/null 2>&1 || true
+      else
+        npm install -g @openai/codex </dev/null >/dev/null 2>&1 || true
+      fi
+      hash -r
+    fi
+    if command -v codex >/dev/null 2>&1; then
+      ok "OpenAI Codex CLI elerheto: $(command -v codex)"
+    else
+      warn "A 'codex' CLI meg nincs a PATH-on. Telepites kesobb: npm install -g @openai/codex"
+    fi
+    ;;
+  agy|antigravity)
+    ORCH_CLI="agy"
+    ORCH_DEFAULT_MODEL="${ORCH_DEFAULT_MODEL:-agy:gemini-3-pro-high}"
+    if [ -x "$HOME/.antigravity/antigravity/bin/agy" ] || command -v agy >/dev/null 2>&1; then
+      ok "Google Antigravity CLI (agy) elerheto"
+    else
+      warn "Az 'agy' CLI meg nincs a PATH-on (~/.antigravity/antigravity/bin/agy). Telepitsd az Antigravity-t vagy add hozza a CLI-t."
+    fi
+    ;;
+  *)
+    ORCH_CLI="claude"
+    ;;
+esac
+
+if [ "$ORCH_CLI" != "claude" ]; then
+  ok "Fo orchestrator mod: $ORCH_CLI ($ORCH_DEFAULT_MODEL) -- Claude Code telepites opcionalis"
+elif _claude_runs; then
   ok "claude mar telepitve es fut: $(claude --version 2>/dev/null || echo 'ok')"
 else
   # Present on PATH but did not launch (the probe above failed while the
@@ -1646,6 +1711,9 @@ if [ -d "$INSTALL_DIR/dist" ]; then
   _built_commit="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)"
   [ -n "$_built_commit" ] && printf '%s\n' "$_built_commit" > "$INSTALL_DIR/dist/.built-commit"
 fi
+if [ "${ORCH_CLI:-claude}" != "claude" ] && [ -f "$INSTALL_DIR/dist/cli-detector.js" ]; then
+  node -e "import(process.argv[1]).then(m=>m.prepareWorkspaceForCli(process.argv[2], process.argv[3]))" "$INSTALL_DIR/dist/cli-detector.js" "$INSTALL_DIR" "$ORCH_CLI" 2>/dev/null || true
+fi
 
 mkdir -p "$INSTALL_DIR/store"
 mkdir -p "$INSTALL_DIR/agents"
@@ -1722,6 +1790,9 @@ env_merge_key BRAND_NAME "${BRAND_NAME}"
 env_merge_key MAIN_AGENT_ID "${MAIN_AGENT_ID}"
 env_merge_key SERVICE_ID "${SERVICE_ID}"
 env_merge_key WEB_PORT "${WEB_PORT:-3420}"
+if [ -n "${ORCH_DEFAULT_MODEL:-}" ]; then
+  env_merge_key MAIN_AGENT_MODEL "${ORCH_DEFAULT_MODEL}"
+fi
 # The fleet's own guards alert under their OWN names: the prod-tree guard
 # (scripts/install-prod-tree-guard-hook.sh) and the channels.sh shared-root
 # guard. The message route accepts a sender only if it is a registered agent,
@@ -1826,7 +1897,10 @@ if [ -z "$_svc_token" ]; then
 fi
 _svc_apikey="$(grep -E '^ANTHROPIC_API_KEY=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
 
-if ! service_auth_present; then
+if [ "${ORCH_CLI:-claude}" = "codex" ] || [ "${ORCH_CLI:-claude}" = "agy" ] || grep -qE '^MAIN_AGENT_MODEL=(codex|agy):' "$INSTALL_DIR/.env" 2>/dev/null; then
+  INSTALL_AUTH_STATE="OK"
+  ok "Fo orchestrator ($ORCH_CLI) aktivalva -- Claude hitelesitesi proba kihagyva"
+elif ! service_auth_present; then
   INSTALL_AUTH_STATE="BROKEN"
 else
   # Probe the way a SERVICE will run: an isolated config dir (so ~/.claude and
