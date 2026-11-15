@@ -41,9 +41,15 @@ export function getClaudePidForSession(session: string): number | null {
     const panePid = parseInt(out.trim().split('\n')[0], 10)
     if (!panePid) return null
     const cmd = execFileSync('/bin/ps', ['-p', String(panePid), '-o', 'comm='], { timeout: 3000, encoding: 'utf-8' }).trim()
-    if (cmd === 'claude' || cmd.endsWith('/claude')) return panePid
+    if (cmd === 'claude' || cmd.endsWith('/claude') || cmd === 'codex' || cmd.endsWith('/codex') || cmd === 'agy' || cmd.endsWith('/agy')) return panePid
+    for (const bin of ['claude', 'codex', 'agy']) {
+      try {
+        const child = execFileSync('/usr/bin/pgrep', ['-P', String(panePid), '-x', bin], { timeout: 3000, encoding: 'utf-8' }).trim()
+        if (child) return parseInt(child.split('\n')[0], 10)
+      } catch { /* none */ }
+    }
     try {
-      const child = execFileSync('/usr/bin/pgrep', ['-P', String(panePid), '-x', 'claude'], { timeout: 3000, encoding: 'utf-8' }).trim()
+      const child = execFileSync('/usr/bin/pgrep', ['-P', String(panePid), '-f', '(?:^|/)(?:claude|codex|agy)(?:\\s|$)'], { timeout: 3000, encoding: 'utf-8' }).trim()
       if (child) return parseInt(child.split('\n')[0], 10)
     } catch { /* none */ }
     return null
@@ -321,9 +327,15 @@ export async function getClaudePidForSessionAsync(session: string): Promise<numb
     const panePid = parseInt(out.trim().split('\n')[0], 10)
     if (!panePid) return null
     const cmd = (await execFileAsync('/bin/ps', ['-p', String(panePid), '-o', 'comm='], { timeout: 3000, encoding: 'utf-8' })).stdout.trim()
-    if (cmd === 'claude' || cmd.endsWith('/claude')) return panePid
+    if (cmd === 'claude' || cmd.endsWith('/claude') || cmd === 'codex' || cmd.endsWith('/codex') || cmd === 'agy' || cmd.endsWith('/agy')) return panePid
+    for (const bin of ['claude', 'codex', 'agy']) {
+      try {
+        const child = (await execFileAsync('/usr/bin/pgrep', ['-P', String(panePid), '-x', bin], { timeout: 3000, encoding: 'utf-8' })).stdout.trim()
+        if (child) return parseInt(child.split('\n')[0], 10)
+      } catch { /* none */ }
+    }
     try {
-      const child = (await execFileAsync('/usr/bin/pgrep', ['-P', String(panePid), '-x', 'claude'], { timeout: 3000, encoding: 'utf-8' })).stdout.trim()
+      const child = (await execFileAsync('/usr/bin/pgrep', ['-P', String(panePid), '-f', '(?:^|/)(?:claude|codex|agy)(?:\\s|$)'], { timeout: 3000, encoding: 'utf-8' })).stdout.trim()
       if (child) return parseInt(child.split('\n')[0], 10)
     } catch { /* none */ }
     return null

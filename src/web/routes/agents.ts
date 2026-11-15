@@ -23,6 +23,7 @@ import { snapshotPersonaFile, writePersonaFileIfUnchanged } from '../persona-wri
 import { measureClaudeCliVersion } from '../claude-cli-version.js'
 import { launchableInstallDefault } from '../default-model-guard.js'
 import { claudeSupportForCli, CLAUDE_MODEL_MIN_CLI } from '../../claude-cli-support.js'
+import { getCliTypeForModel, getCodexAvailableModels, getAgyAvailableModels, detectAvailableClis, type CliType } from '../../cli-detector.js'
 import { CHANNEL_PLUGIN_IDS } from '../plugin-ids.js'
 import { getSecret, setSecret, deleteSecret, listSecrets } from '../vault.js'
 import { loadOpenRouterCatalog, fetchAllOpenRouterModels, loadCuratedManual, addCuratedManual, removeCuratedManual } from '../openrouter-models.js'
@@ -606,6 +607,7 @@ export interface AgentSummary {
   /** The concrete model id this agent resolves to. Unchanged meaning: for a
    *  config that names a `model`, this is exactly what it always was. */
   model: string
+  cliType?: CliType
   /** Card c755f4b2 Block B: how `model` was arrived at. Metadata only -- it
    *  reports the existing resolution, it does not change it. */
   modelProfile: string | null
@@ -778,6 +780,7 @@ function getAgentSummary(name: string): AgentSummary {
     tagline: readAgentTagline(name),
     description: extractDescriptionFromClaudeMd(claudeMd),
     model: modelResolution.model,
+    cliType: getCliTypeForModel(modelResolution.model),
     modelProfile: typeof agentModelConfig.modelProfile === 'string' ? agentModelConfig.modelProfile : null,
     modelSource: modelResolution.source,
     modelProfileError: modelResolution.error ?? null,
@@ -966,6 +969,9 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       openrouterConfigured: hasOpenRouter,
       // Custom Anthropic-compatible providers defined in store/custom-providers.json.
       customProviders: listCustomProviders(),
+      codex: getCodexAvailableModels(),
+      agy: getAgyAvailableModels(),
+      cliTools: detectAvailableClis(),
     })
     return true
   }

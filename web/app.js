@@ -5573,6 +5573,59 @@ async function loadAvailableModels() {
     if (!res.ok) return
     const data = await res.json()
     applyClaudeCliGate(data)
+
+    const codexModels = Array.isArray(data.codex) ? data.codex : []
+    for (const group of [document.getElementById('codexModelGroup'), document.getElementById('agentModelCodexGroup')]) {
+      if (!group) continue
+      const sel = group.parentElement
+      const prevVal = sel ? sel.value : ''
+      group.label = t('agents.model.optgroup_codex')
+      group.innerHTML = ''
+      if (codexModels.length === 0) {
+        group.style.display = 'none'
+        continue
+      }
+      group.style.display = ''
+      for (const m of codexModels) {
+        if (sel) {
+          Array.from(sel.querySelectorAll('option.dynamic-model-opt')).forEach((o) => {
+            if (o.value === m.id) o.remove()
+          })
+        }
+        const opt = document.createElement('option')
+        opt.value = m.id
+        opt.textContent = m.label
+        group.appendChild(opt)
+      }
+      if (sel && prevVal) sel.value = prevVal
+    }
+
+    const agyModels = Array.isArray(data.agy) ? data.agy : []
+    for (const group of [document.getElementById('agyModelGroup'), document.getElementById('agentModelAgyGroup')]) {
+      if (!group) continue
+      const sel = group.parentElement
+      const prevVal = sel ? sel.value : ''
+      group.label = t('agents.model.optgroup_agy')
+      group.innerHTML = ''
+      if (agyModels.length === 0) {
+        group.style.display = 'none'
+        continue
+      }
+      group.style.display = ''
+      for (const m of agyModels) {
+        if (sel) {
+          Array.from(sel.querySelectorAll('option.dynamic-model-opt')).forEach((o) => {
+            if (o.value === m.id) o.remove()
+          })
+        }
+        const opt = document.createElement('option')
+        opt.value = m.id
+        opt.textContent = m.label
+        group.appendChild(opt)
+      }
+      if (sel && prevVal) sel.value = prevVal
+    }
+
     const deepseekModels = Array.isArray(data.deepseek) ? data.deepseek : []
     const editGroup = document.getElementById('deepseekModelGroup')
     const wizardGroup = document.getElementById('agentModelDeepseekGroup')

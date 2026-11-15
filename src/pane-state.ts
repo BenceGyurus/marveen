@@ -326,6 +326,10 @@ const BUSY_INDICATORS: RegExp[] = [
     String.raw`^\s*\S \S+… \(running [A-Za-z]+ hooks(?:…|\.\.\.)\s*\d+/\d+\s*·\s*${TURN_ELAPSED}(?=\s*[·)])`,
     'm',
   ),
+  // Antigravity (agy) live turn spinner: "⣷  Generating..." / "Thinking..." above the input box
+  /^\s*[\u2800-\u28ff]\s+(?:Generating|Thinking|Working|Running)\.\.\./m,
+  // OpenAI Codex (codex) live turn status: "• Working (0s • esc to interrupt)"
+  /^\s*[•·]\s*Working\s*\([^\n)]*\besc to interrupt\b/m,
 ]
 
 // `esc to interrupt` is a footer-region-only busy signal: Claude Code
@@ -336,6 +340,8 @@ const BUSY_INDICATORS: RegExp[] = [
 // (observed incident: 81 consecutive scheduler retries on a report that
 // contained the phrase in its body).
 const BUSY_ESC_TO_INTERRUPT_RX = /\besc to interrupt\b/
+// Antigravity (agy) busy footer: "esc to cancel    auto · Gemini 2.5 Flash · high"
+const BUSY_AGY_FOOTER_RX = /^\s*esc to cancel\s{2,}(?:auto|manual|plan)\s*·\s*\S/im
 const LIVE_FOOTER_REGION_LINES = 5
 
 /**
@@ -802,8 +808,8 @@ export function detectsBlockingMenu(pane: string): boolean {
   }
   const lines = pane.split('\n')
   const footerRegion = liveTailRegion(lines, MENU_FOOTER_REGION_LINES)
-  if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
-  if (hasIdleFooter(lines)) return false
+  if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion) || BUSY_AGY_FOOTER_RX.test(footerRegion)) return false
+  if (hasIdleFooter(lines) || detectAltCliInput(lines) !== null) return false
   // A held cross-session message is a QUESTION for a person, not a stray
   // modal: Escape there is not a neutral "back" -- it may decline the message
   // and tell the sender so (the dialog's Deny: "drop it and tell the sender it
@@ -1109,7 +1115,7 @@ const FIRST_RUN_GATES: Array<{ kind: FirstRunGateKind; rx: RegExp }> = [
   // merely skip the answer (answerFirstRunGates reports 'unchanged'), it hands
   // the pane to the GENERIC blocking-menu recovery, which sends Escape -- and
   // on this dialog Escape IS "No, exit". A fresh install quit on startup.
-  { kind: 'trust', rx: /Do you trust the files in this folder\?|Yes, I trust this folder/ },
+  { kind: 'trust', rx: /Do you trust the files in this folder\?|Do you trust the contents of this project\?|Trust this folder\?|Yes, I trust this folder/ },
   { kind: 'bypass-permissions', rx: /Bypass Permissions mode/ },
   { kind: 'login', rx: /Select login method/ },
   { kind: 'theme', rx: /Choose the text style/ },
@@ -1204,7 +1210,10 @@ export function devChannelsAcceptKeys(pane: string): string[] | null {
 export function firstRunAcceptKeys(pane: string): string[] | null {
   if (!pane || !pane.trim()) return null
   const lines = pane.split('\n')
-  const cursorIdx = lines.findIndex(l => l.includes(CURSOR_GLYPH))
+  let cursorIdx = lines.findIndex(l => l.includes(CURSOR_GLYPH))
+  if (cursorIdx < 0) {
+    cursorIdx = lines.findIndex(l => /^(?:\s*│)?\s*[>\u203a]\s+(?:Yes\b|No\b|\d+\.)/i.test(l))
+  }
   if (cursorIdx < 0) return null
 
   // The options are the contiguous run of non-blank lines around the cursor.
@@ -1216,14 +1225,19 @@ export function firstRunAcceptKeys(pane: string): string[] | null {
   while (last < lines.length - 1 && lines[last + 1].trim() !== '') last++
   const block = lines.slice(first, last + 1)
 
-  // The target is the option that accepts. Match on "yes" and exclude the
-  // refusal explicitly, so a future "Yes, exit"-shaped wording cannot be
-  // mistaken for consent.
-  const yesIdx = block.findIndex(l => /\byes\b/i.test(l) && !/\bno,\s*exit\b/i.test(l))
+  // The target is the option that accepts. Match on "yes" (or Antigravity's
+  // "1. Trust folder" / Codex's "1. Trust and continue") and exclude the refusal
+  // explicitly, so a future "Yes, exit"-shaped wording cannot be mistaken for consent.
+  const isAcceptOption = (l: string) =>
+    (/\byes\b/i.test(l) || /\b1\.\s*Trust folder\b/i.test(l) || /\b1\.\s*Trust and continue\b/i.test(l)) &&
+    !/\bno,\s*exit\b/i.test(l) &&
+    !/\bdon't trust\b/i.test(l) &&
+    !/\bBack to Agent Command Center\b/i.test(l)
+  const yesIdx = block.findIndex(isAcceptOption)
   if (yesIdx < 0) return null
   // Ambiguity is a reason to stop, not to guess: two "yes"-looking rows mean
   // the layout is not what this function models.
-  if (block.filter(l => /\byes\b/i.test(l) && !/\bno,\s*exit\b/i.test(l)).length !== 1) return null
+  if (block.filter(isAcceptOption).length !== 1) return null
 
   const delta = yesIdx - (cursorIdx - first)
   const move = delta === 0 ? [] : Array.from({ length: Math.abs(delta) }, () => (delta > 0 ? 'Down' : 'Up'))
@@ -1242,8 +1256,8 @@ export function detectsFirstRunGate(pane: string): FirstRunGateKind | null {
     if (rx.test(busyRegion)) return null
   }
   const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
-  if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return null
-  if (hasIdleFooter(lines)) return null
+  if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion) || BUSY_AGY_FOOTER_RX.test(footerRegion)) return null
+  if (hasIdleFooter(lines) || detectAltCliInput(lines) !== null) return null
   for (const g of FIRST_RUN_GATES) {
     if (!g.rx.test(pane)) continue
     // The welcome banner also heads the NORMAL fresh-session layout (logo +
@@ -1650,7 +1664,7 @@ export function detectPaneState(
   // (e.g. in a watchdog report or a log analysis) permanently classify
   // an idle session as busy.
   const footerRegion = liveTailRegion(paneLines, LIVE_FOOTER_REGION_LINES)
-  if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return 'busy'
+  if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion) || BUSY_AGY_FOOTER_RX.test(footerRegion)) return 'busy'
   const lastLine = footerRegion.slice(footerRegion.lastIndexOf('\n') + 1)
   if (BUSY_ESC_CLIPPED_RX.test(lastLine) && FOOTER_TRUNCATED_RX.test(lastLine)) return 'busy'
 
@@ -1664,6 +1678,15 @@ export function detectPaneState(
   // below. A placeholder must read 'busy' so the scheduler/router/keepalive
   // defer rather than pile a second prompt on.
   if (detectsPastePlaceholder(pane)) return 'busy'
+
+  // Antigravity (agy) and OpenAI Codex (codex) TUI input-box / idle / typing check.
+  const alt = detectAltCliInput(paneLines)
+  if (alt !== null) {
+    if (alt.booting) return 'unknown'
+    if (alt.busy) return 'busy'
+    if (alt.parked) return opts.mergeTypingAsBusy ? 'busy' : 'typing'
+    return 'idle'
+  }
 
   if (!hasIdleFooter(paneLines)) {
     // Footer-less fresh-session / welcome-screen: a PARKED \u276F input box still
@@ -1783,8 +1806,136 @@ function liveInputBoxFooterless(lines: string[]): string | null {
   return inner.join('\n')
 }
 
+// Antigravity (agy) and OpenAI Codex (codex) TUI input-box detector.
+// - agy frames its `>` input box between two BOX_SEP_RX rules with a footer line
+//   carrying `<mode> · <Model>` (`auto · Gemini 2.5 Flash · high`) below the bottom rule.
+//   Its initial placeholder is `> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)`.
+// - codex renders a `›` (\u203a) prompt line above its status/shortcuts footer
+//   (`GPT-5.4 high · /path/to/dir`, `← for agents · ? for shortcuts`).
+//   Its idle placeholder is `› Ask Codex to do anything`.
+const AGY_FOOTER_RX = /^\s*(?:(?:\? for shortcuts\s+)?(?:auto|manual|plan|agent(?:\s*\([^)]+\))?)\s*·\s*\S|\? for shortcuts\s{2,}(?:Gemini|Claude|GPT)\b.*·\s*\S)/i
+const AGY_PLACEHOLDER_RX = /^\s*[>\u276F]\s*(?:(?:Auto|Manual|Plan) mode:.*\(shift\+tab to cycle\)|Type your message or @path\/to\/file)\s*$/i
+const CODEX_PROMPT_RX = /^\s*\u203a(?:\s|$)/
+const CODEX_PLACEHOLDER_RX = /^\s*\u203a(?:\s*(?:Ask Codex to do anything|Write tests for @filename|Explain this codebase|Find and fix a bug in @filename|Summarize recent commits))?\s*$/
+const CODEX_MODEL_STATUS_RX = /^\s+\S[\w.\s%-]*·[\w.\s%·-]*\s*(?:~\/|\/|[A-Za-z]:\\)/
+const CODEX_STATUS_LINE_RX = /^\s+(?:(?:← for agents\s*·\s*)?\? for shortcuts\b|\S[\w.\s%-]*·[\w.\s%·-]*\s*(?:~\/|\/|[A-Za-z]:\\)|⚠\s+\d+\s+warnings?\b|tab to queue message\b)/
+const CODEX_LIVE_BUSY_LINE_RX = /^\s*[•·]\s*[^\n]*\([^\n)]*\besc to interrupt\b/
+
+function detectAltCliInput(lines: string[]): { cli: 'agy' | 'codex'; box: string; parked: boolean; busy?: boolean; booting?: boolean } | null {
+  let last = lines.length - 1
+  while (last >= 0 && lines[last].trim() === '') last--
+  if (last < 0) return null
+
+  // 1. Antigravity (agy): two BOX_SEP_RX rules with AGY_FOOTER_RX beneath the bottom rule and `>` prompt inside
+  let bottomSep = -1
+  for (let i = last; i >= Math.max(0, last - 4); i--) {
+    if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }
+  }
+  if (bottomSep > 0 && bottomSep < last) {
+    let hasAgyFooter = false
+    for (let i = bottomSep + 1; i <= last; i++) {
+      const plain = stripAllAnsi(lines[i])
+      if (AGY_FOOTER_RX.test(plain) && !BUSY_AGY_FOOTER_RX.test(plain)) {
+        hasAgyFooter = true
+        break
+      }
+    }
+    if (hasAgyFooter) {
+      let topSep = -1
+      for (let i = bottomSep - 1; i >= 0; i--) {
+        if (BOX_SEP_RX.test(lines[i])) { topSep = i; break }
+      }
+      if (topSep >= 0) {
+        const inner = lines.slice(topSep + 1, bottomSep)
+        const nonEmpty = inner.filter(l => l.trim().length > 0)
+        if (nonEmpty.length > 0 && /^\s*[>\u276F]/.test(nonEmpty[0])) {
+          const isPlaceholderOrEmpty =
+            nonEmpty.length === 1 &&
+            (/^\s*[>\u276F]\s*$/.test(nonEmpty[0]) || AGY_PLACEHOLDER_RX.test(nonEmpty[0]))
+          return {
+            cli: 'agy',
+            box: isPlaceholderOrEmpty ? '>' : inner.join('\n'),
+            parked: !isPlaceholderOrEmpty,
+          }
+        }
+      }
+    }
+  }
+
+  // 2. OpenAI Codex (codex): `›` (\u203a) prompt line above trailing Codex status/footer lines.
+  // The `<Model> · <path> · <title>` line can wrap across two rows above `← for agents · ? for shortcuts`,
+  // so anchor statusStart on the earliest model/status line within the bottom 6 rows.
+  let statusStart = last + 1
+  let hasCodexModelLine = false
+  let hasQueueHint = false
+  for (let i = Math.max(0, last - 5); i <= last; i++) {
+    const plain = stripAllAnsi(lines[i])
+    if (plain.trim() === '') continue
+    if (CODEX_MODEL_STATUS_RX.test(plain)) {
+      hasCodexModelLine = true
+      if (i < statusStart) statusStart = i
+    } else if (CODEX_STATUS_LINE_RX.test(plain)) {
+      if (i < statusStart) statusStart = i
+    }
+    if (/\btab to queue message\b/.test(plain)) hasQueueHint = true
+  }
+  if (statusStart <= last) {
+    let promptIdx = -1
+    for (let i = statusStart - 1; i >= Math.max(0, statusStart - 10); i--) {
+      const plain = stripAllAnsi(lines[i])
+      if (/^\s*[•⏺]/.test(plain) || BOX_SEP_RX.test(plain)) break
+      if (CODEX_PROMPT_RX.test(plain)) {
+        promptIdx = i
+        break
+      }
+    }
+    if (promptIdx >= 0) {
+      let boxEnd = statusStart
+      while (boxEnd > promptIdx + 1 && lines[boxEnd - 1].trim() === '') boxEnd--
+      const inner = lines.slice(promptIdx, boxEnd)
+      const nonEmpty = inner.filter(l => l.trim().length > 0)
+      const isPlaceholderOrEmpty =
+        nonEmpty.length === 1 && CODEX_PLACEHOLDER_RX.test(stripAllAnsi(nonEmpty[0]))
+      // Check the last non-empty conversation line above the bottom-docked input box
+      // (skipping blank rows and the right-aligned `⚠ 5h limit:` banner) for a live
+      // Codex turn indicator (`• Working (1s • esc to interrupt)` / `• Starting MCP servers...`).
+      let codexBusyAbove = false
+      for (let i = promptIdx - 1; i >= 0; i--) {
+        const plain = stripAllAnsi(lines[i])
+        if (plain.trim() === '' || /^\s*⚠\b/.test(plain)) continue
+        if (CODEX_LIVE_BUSY_LINE_RX.test(plain)) codexBusyAbove = true
+        break
+      }
+      return {
+        cli: 'codex',
+        box: isPlaceholderOrEmpty ? '\u203a' : inner.join('\n'),
+        parked: !isPlaceholderOrEmpty,
+        busy: codexBusyAbove || hasQueueHint,
+        booting: !hasCodexModelLine,
+      }
+    }
+  } else if (
+    CODEX_PROMPT_RX.test(stripAllAnsi(lines[last])) &&
+    lines.some(l => /OpenAI Codex/i.test(l))
+  ) {
+    const plainLast = stripAllAnsi(lines[last])
+    const isPlaceholderOrEmpty = CODEX_PLACEHOLDER_RX.test(plainLast)
+    return {
+      cli: 'codex',
+      box: isPlaceholderOrEmpty ? '\u203a' : lines[last],
+      parked: !isPlaceholderOrEmpty,
+      busy: false,
+      booting: isPlaceholderOrEmpty,
+    }
+  }
+
+  return null
+}
+
 function liveInputBox(pane: string): string | null {
   const lines = pane.split('\n')
+  const alt = detectAltCliInput(lines)
+  if (alt !== null) return alt.box
   const footerIdx = idleFooterIndex(lines)
   if (footerIdx < 0) return liveInputBoxFooterless(lines)
   let bottomSep = -1
@@ -1876,6 +2027,16 @@ export function shouldRetrySubmit(
 
   const retryPaneLines = pane.split('\n')
 
+  const rawMin = opts.minHintChars
+  const safeMin = typeof rawMin === 'number' && Number.isFinite(rawMin) ? rawMin : 16
+  const minHint = Math.max(safeMin, 1)
+
+  const retryAlt = detectAltCliInput(retryPaneLines)
+  if (retryAlt !== null) {
+    if (!retryAlt.parked || payloadHint.length < minHint) return false
+    return retryAlt.box.includes(payloadHint)
+  }
+
   // Busy pane: the turn is mid-flight, no retry needed. Region-scoped (same
   // as detectPaneState) so a stale token-counter line does not suppress a
   // legitimate retry on an idle pane.
@@ -1885,7 +2046,7 @@ export function shouldRetrySubmit(
   }
   // Footer-region `esc to interrupt` check (same scoping as detectPaneState).
   const retryFooterRegion = liveTailRegion(retryPaneLines, LIVE_FOOTER_REGION_LINES)
-  if (BUSY_ESC_TO_INTERRUPT_RX.test(retryFooterRegion)) return false
+  if (BUSY_ESC_TO_INTERRUPT_RX.test(retryFooterRegion) || BUSY_AGY_FOOTER_RX.test(retryFooterRegion)) return false
 
   // Path 1: placeholder is unambiguous, retry regardless of hint -- and it is
   // checked BEFORE the idle-footer gate below. The footer beneath a placeholder
@@ -1905,15 +2066,6 @@ export function shouldRetrySubmit(
   if (inputBox == null) return false
 
   // Path 2: verbatim payload parked in the input box.
-  // Clamp the minimum hint length to >= 1. minHintChars=0 paired with
-  // an empty payloadHint would otherwise let `inputBox.includes("")`
-  // return true for every non-empty box, retrying Enter on every idle
-  // pane. Non-finite inputs (NaN, Infinity) fall back to the default
-  // so a malformed caller can't silently disable or saturate the
-  // verbatim path either.
-  const rawMin = opts.minHintChars
-  const safeMin = typeof rawMin === 'number' && Number.isFinite(rawMin) ? rawMin : 16
-  const minHint = Math.max(safeMin, 1)
   if (payloadHint.length < minHint) return false
   return inputBox.includes(payloadHint)
 }
@@ -2224,9 +2376,9 @@ export function parkedInputText(pane: string): string | null {
   if (detectPaneState(pane) !== 'typing') return null
   const box = liveInputBox(pane)
   if (box == null) return null
-  // Collapse terminal wrap, then strip the leading ❯ prompt marker so the
+  // Collapse terminal wrap, then strip the leading ❯ / › / > prompt marker so the
   // re-injected text is the message itself, not the prompt glyph.
-  const flat = box.replace(/\s+/g, ' ').trim().replace(/^❯\s*/, '').trim()
+  const flat = box.replace(/\s+/g, ' ').trim().replace(/^(?:❯|\u203a|>)\s*/, '').trim()
   return flat.length > 0 ? flat : null
 }
 
@@ -2349,7 +2501,7 @@ export function parkedInputRowCount(pane: string): number {
   if (box == null) return 0
   return box
     .split('\n')
-    .map((row) => row.replace(/^\s*❯/, '').trim())
+    .map((row) => row.replace(/^\s*(?:❯|\u203a|>)/, '').trim())
     .filter((row) => row.length > 0).length
 }
 

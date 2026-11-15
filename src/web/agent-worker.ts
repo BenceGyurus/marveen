@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { homedir, tmpdir, userInfo } from 'node:os'
 import { createHash } from 'node:crypto'
 import { resolveFromPath, tryResolveFromPath } from '../platform.js'
+import { getCliTypeForModel, stripCliModelPrefix, stampAgyWorkspaceTrust, stampCodexWorkspaceTrust } from '../cli-detector.js'
 import { logger } from '../logger.js'
 import { launchableInstallDefaultSync, launchableDistributionDefaultSync } from './default-model-guard.js'
 import { measureClaudeCliVersionSync } from './claude-cli-version.js'
@@ -566,6 +567,8 @@ export function withWorkerGates(settings: WorkerSettings): WorkerSettings {
 export function ensureWorkerCwd(ctx: WorkerCtx = ctxSlow): void {
   if (!existsSync(ctx.home)) mkdirSync(ctx.home, { recursive: true })
   if (!existsSync(ctx.scratchDir)) mkdirSync(ctx.scratchDir, { recursive: true })
+  stampAgyWorkspaceTrust(ctx.home)
+  stampCodexWorkspaceTrust(ctx.home)
 
   const mcpPath = join(ctx.home, '.mcp.json')
   if (!existsSync(mcpPath)) writeFileSync(mcpPath, '{"mcpServers":{}}\n')
@@ -948,9 +951,13 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
     `${ROOT_SANDBOX_ENV}; ` +
     customEnvPrefix +
     `cd ${shArg(ctx.home)} && ` +
-    `${shArg(claudeLaunchBin)} --dangerously-skip-permissions --model ${shArg(workerModel)} ` +
-    // WORKERMCPSEND1104 part 2: only the servers in the worker's own MCP config, nothing from any other source.
-    `--strict-mcp-config --mcp-config ${shArg(workerMcpConfigPath(ctx))}`
+    (getCliTypeForModel(workerModel) === 'codex'
+      ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${shArg(tryResolveFromPath('codex') ?? 'codex')} --dangerously-bypass-approvals-and-sandbox --no-alt-screen${stripCliModelPrefix(workerModel) ? ` -m ${shArg(stripCliModelPrefix(workerModel))}` : ''}`
+      : getCliTypeForModel(workerModel) === 'agy'
+        ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${shArg(tryResolveFromPath('agy') ?? 'agy')} chat --mode agent -y --no-persist${stripCliModelPrefix(workerModel) ? ` --model ${shArg(stripCliModelPrefix(workerModel))}` : ''}`
+        : `${shArg(claudeLaunchBin)} --dangerously-skip-permissions --model ${shArg(workerModel)} ` +
+          // WORKERMCPSEND1104 part 2: only the servers in the worker's own MCP config, nothing from any other source.
+          `--strict-mcp-config --mcp-config ${shArg(workerMcpConfigPath(ctx))}`)
   execFileSync(TMUX, ['new-session', '-d', '-s', ctx.session, '-c', ctx.home, 'bash', '-lc', launch], { timeout: 8000 })
   logger.info({ session: ctx.session, cwd: ctx.home }, 'agent-worker: launched interactive worker session')
   // APRO920 (c)(2): same rationale as startAgentProcess's model-resolved log --
@@ -1143,6 +1150,8 @@ function restartWorkerSession(ctx: WorkerCtx): void {
 
 // Reset context between requests so unrelated one-shots never share/grow context.
 function clearWorkerContext(ctx: WorkerCtx): void {
+  const effectiveModel = ctx.modelOverride ?? WORKER_MODEL_OVERRIDE ?? DEFAULT_AGENT_MODEL
+  if (getCliTypeForModel(effectiveModel) !== 'claude') return
   try {
     execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(ctx.session), '-l', '/clear'], { timeout: 5000 })
     execFileSync('/bin/sleep', ['0.2'], { timeout: 2000 })

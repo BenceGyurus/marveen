@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { json } from '../http-helpers.js'
 import { agentDir } from '../agent-config.js'
-import { projectsDirFor } from '../active-model.js'
+import { projectsDirFor, findAltCliTranscriptForWorkingDir } from '../active-model.js'
 import { isMainChannelsAgent } from '../main-agent.js'
 import { configDirFor } from '../main-transcript-root.js'
 import { PROJECT_ROOT } from '../../config.js'
@@ -41,18 +41,19 @@ function newestTranscript(name: string): string | null {
   // agents/<name>/.claude-config. Reading the host default then shows a stale
   // transcript as if it were live (#2716). Same reason as routes/agents.ts
   // (resolveTranscriptLocation and the transcript tail).
+  const workDir = workingDirFor(name)
   const configDir = configDirFor(name)
-  const dir = projectsDirFor(workingDirFor(name), configDir)
+  const dir = projectsDirFor(workDir, configDir)
   try {
-    if (!existsSync(dir)) return null
-    const files = readdirSync(dir)
-      .filter(f => f.endsWith('.jsonl'))
-      .map(f => ({ f, m: statSync(join(dir, f)).mtimeMs }))
-      .sort((a, b) => b.m - a.m)
-    return files.length ? join(dir, files[0].f) : null
-  } catch {
-    return null
-  }
+    if (existsSync(dir)) {
+      const files = readdirSync(dir)
+        .filter(f => f.endsWith('.jsonl'))
+        .map(f => ({ f, m: statSync(join(dir, f)).mtimeMs }))
+        .sort((a, b) => b.m - a.m)
+      if (files.length) return join(dir, files[0].f)
+    }
+  } catch { /* fall through */ }
+  return findAltCliTranscriptForWorkingDir(workDir)?.file ?? null
 }
 
 const CHANNEL_RE = /<channel\b[^>]*>([\s\S]*?)<\/channel>/g
@@ -90,7 +91,54 @@ function buildTimeline(file: string): Entry[] {
     let d: Record<string, unknown>
     try { d = JSON.parse(t) } catch { continue }
     const type = d['type']
-    const ts = typeof d['timestamp'] === 'string' ? (d['timestamp'] as string) : null
+    const ts = typeof d['timestamp'] === 'string'
+      ? (d['timestamp'] as string)
+      : (typeof d['created_at'] === 'string' ? (d['created_at'] as string) : null)
+
+    // Antigravity (agy) transcript entries
+    if (type === 'USER_INPUT') {
+      const rawContent = typeof d['content'] === 'string' ? (d['content'] as string) : ''
+      const reqMatch = /<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/.exec(rawContent)
+      const txt = (reqMatch ? reqMatch[1] : rawContent).trim()
+      if (txt) entries.push({ ts, kind: 'in', text: clip(txt) })
+      continue
+    }
+    if (type === 'PLANNER_RESPONSE') {
+      const toolCalls = d['tool_calls']
+      if (Array.isArray(toolCalls)) {
+        for (const tc of toolCalls as Array<Record<string, unknown>>) {
+          const tName = typeof tc['name'] === 'string' ? (tc['name'] as string) : 'tool'
+          entries.push({ ts, kind: 'action', text: tName })
+        }
+      }
+      const txt = typeof d['content'] === 'string' ? (d['content'] as string).trim() : ''
+      if (txt) entries.push({ ts, kind: 'note', text: clip(txt) })
+      continue
+    }
+
+    // Codex rollout entries
+    if (type === 'response_item') {
+      const payload = d['payload'] as Record<string, unknown> | undefined
+      if (!payload) continue
+      const pType = payload['type']
+      const role = payload['role']
+      if (pType === 'message' && (role === 'user' || role === 'assistant')) {
+        const blocks = payload['content']
+        if (Array.isArray(blocks)) {
+          for (const b of blocks as Array<Record<string, unknown>>) {
+            const txt = typeof b['text'] === 'string' ? (b['text'] as string).trim() : ''
+            if (!txt) continue
+            if (role === 'user' && /^<(?:permissions instructions|collaboration_mode|tools|recommended_plugins|skills_instructions|environment_context)\b/.test(txt)) continue
+            entries.push({ ts, kind: role === 'user' ? 'in' : 'note', text: clip(txt) })
+          }
+        }
+      } else if (pType === 'function_call' || pType === 'local_shell_call') {
+        const name = typeof payload['name'] === 'string' ? (payload['name'] as string) : String(pType)
+        entries.push({ ts, kind: 'action', text: name })
+      }
+      continue
+    }
+
     const msg = d['message'] as Record<string, unknown> | undefined
     if (!msg) continue
 

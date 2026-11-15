@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { userInfo } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { ROOT_SANDBOX_ENV } from './root-sandbox-env.js'
+import { getCliTypeForModel, stripCliModelPrefix } from '../cli-detector.js'
 
 // SSH + tmux transport primitives.
 //
@@ -161,8 +162,16 @@ export function buildRemoteLaunchCommand(opts: {
 }): string {
   const path = 'export PATH="$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"'
   const cont = opts.continue ? '--continue ' : ''
+  const cliType = getCliTypeForModel(opts.model)
+  const cleanModel = stripCliModelPrefix(opts.model)
   // CHANSPARE925: no Agent view on remote agents either (parity with every local launch).
   // ROOTRESPAWN1001: evaluated on the REMOTE host, where claude runs.
+  if (cliType === 'codex') {
+    return `${path} && unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && export CLAUDE_CODE_DISABLE_AGENT_VIEW=1 && ${ROOT_SANDBOX_ENV} && cd ${shQuote(opts.workdir)} && codex ${opts.continue ? 'resume --last ' : ''}--dangerously-bypass-approvals-and-sandbox${cleanModel ? ` -m ${shQuote(cleanModel)}` : ''}`
+  }
+  if (cliType === 'agy') {
+    return `${path} && unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && export CLAUDE_CODE_DISABLE_AGENT_VIEW=1 && ${ROOT_SANDBOX_ENV} && cd ${shQuote(opts.workdir)} && agy ${cont}--dangerously-skip-permissions${cleanModel ? ` --model ${shQuote(cleanModel)}` : ''}`
+  }
   return `${path} && export CLAUDE_CODE_DISABLE_AGENT_VIEW=1 && ${ROOT_SANDBOX_ENV} && cd ${shQuote(opts.workdir)} && claude ${cont}--dangerously-skip-permissions --model ${shQuote(opts.model)}`
 }
 

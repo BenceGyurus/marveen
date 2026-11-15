@@ -86,6 +86,7 @@ import { measureClaudeCliVersion } from './claude-cli-version.js'
 import { decideStateObserver, stateObserverLaunchEnv } from './state-observer.js'
 import { launchableInstallDefault } from './default-model-guard.js'
 import { getClaudePidForSession, probeChannelPluginLiveness } from '../channel-coordinator/liveness.js'
+import { findAltCliTranscriptForWorkingDir } from './active-model.js'
 import { CHANNEL_PROVIDER, MAIN_AGENT_ID, STORE_DIR, PROJECT_ROOT, SUBAGENT_INBOX_TEE, FLEET_PYTHON_VENV } from '../config.js'
 import { fleetVenvBin } from '../fleet-venv.js'
 
@@ -123,6 +124,9 @@ import { notifyChannel, alertIsRedirected } from '../notify.js'
 // first use; see makeLazyBinResolver.
 const tmuxBin = makeLazyBinResolver('tmux')
 const claudeBin = makeLazyBinResolver('claude')
+const codexBin = makeLazyBinResolver('codex')
+const agyBin = makeLazyBinResolver('agy')
+import { getCliTypeForModel, stripCliModelPrefix, prepareWorkspaceForCli, type CliType } from '../cli-detector.js'
 
 // Shared async pacing helper. Replaces the blocking synchronous `/bin/sleep`
 // (execFileSync) pauses in the tmux-driving injection hot-path so a pacing wait
@@ -2692,6 +2696,9 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     // Skip this resolution entirely for custom providers -- their model ids go
     // verbatim to the custom endpoint and have no openrouter-auto semantics.
     const model = isCustom ? rawModel : resolveOpenRouterModel(rawModel)
+    const cliType = isCustom ? 'claude' : getCliTypeForModel(model)
+    const cleanModel = stripCliModelPrefix(model)
+    prepareWorkspaceForCli(dir, cliType)
     const authMode = readAgentAuthMode(name)
     const isClaude = !isCustom && model.startsWith('claude-')
     // 2fb86ef2 backstop: the decision above already refused a custom-provider or
@@ -2732,6 +2739,7 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
         const ertek = (getSecret(id) ?? '').trim()
         return ertek ? launchSecretRef(`${name}.${id}`, ertek) : null
       }, customProviderDef).exportsStr
+      if (cliType !== 'claude' && !isCustom) providerEnv = ''
     } catch (err) {
       // Custom-provider vault key missing (deleted from the vault after the
       // provider was configured). Abort launch with a clear error rather than
@@ -3260,7 +3268,10 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
       ? join(claudeConfigDir, 'projects')
       : join(homedir(), '.claude', 'projects')
     const encodedProject = encodeClaudeProjectDir(dir)
-    const hasPriorSession = existsSync(join(projectsRoot, encodedProject))
+    const hasPriorSession =
+      cliType === 'claude'
+        ? existsSync(join(projectsRoot, encodedProject))
+        : findAltCliTranscriptForWorkingDir(dir, undefined, cliType) !== null
     // opts.fresh forces a brand-new conversation (auto-restart 'fresh' mode):
     // omit --continue so the heavy accumulated context is dropped. Without it
     // we resume the prior session (the 'continue' mode / normal restart).
@@ -3411,7 +3422,7 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     // FLEETVENV923: the fleet venv's bin/ goes FIRST so its python3 beats the
     // Homebrew one that carries no packages.
     const venvPathPrefix = fleetVenvPathPrefix()
-    const buildLaunchCmd = (launchCwd: string) => `${umaskPrefix}export PATH="${venvPathPrefix}/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${stateFence}${autoUpdaterEnv}${byoUnsetEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${helperTokenEnvPiece}${agentEgressEnv}${oauthTokenEnv}${providerEnv}${stateObserverEnv}cd "${launchCwd}" && ${claudeBin()} ${continueFlag}${skipFlag}--model ${shSingleQuote(model)} ${channelFlag}${worksourceFlags}${bashSandboxFlag}`.trimEnd()
+    const buildLaunchCmd = (launchCwd: string) => `${umaskPrefix}export PATH="${venvPathPrefix}/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${stateFence}${autoUpdaterEnv}${byoUnsetEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${helperTokenEnvPiece}${agentEgressEnv}${oauthTokenEnv}${providerEnv}${stateObserverEnv}cd "${launchCwd}" && ${cliType === 'codex' ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${codexBin()} ${continueFlag ? 'resume --last ' : ''}${skipFlag ? '--dangerously-bypass-approvals-and-sandbox ' : '--sandbox workspace-write '}${cleanModel ? `-m ${shSingleQuote(cleanModel)}` : ''}` : cliType === 'agy' ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${agyBin()} ${continueFlag}${skipFlag}${cleanModel ? `--model ${shSingleQuote(cleanModel)}` : ''}` : `${claudeBin()} ${continueFlag}${skipFlag}--model ${shSingleQuote(model)} ${channelFlag}${worksourceFlags}${bashSandboxFlag}`}`.trimEnd()
     // The agent's own target: for a per-user agent this is what makes the whole
     // session (and every process inside it) belong to that uid. Passing null here
     // silently started it as the router's user -- measured 2026-08-19: the start
@@ -3542,7 +3553,7 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     // -- the outbound pre-flight remains the safety net if this misses.
     // Fire-and-forget: scheduleIdentitySetup only schedules delayed timers;
     // startAgentProcess stays synchronous (out of scope, per the conversion rules).
-    void scheduleIdentitySetup(session, readAgentDisplayName(name))
+    void scheduleIdentitySetup(session, readAgentDisplayName(name), null, cliType)
 
     // Colleague auto-unlock (2026-06-22): mirror the main session's
     // post-respawn unlock probe for channel-having sub-agents. After a restart
@@ -4182,7 +4193,7 @@ const IDENTITY_LANE_MAX_ATTEMPTS = 5
 // embedded in its own instructions; it did not execute it, but a writer that
 // can inject arbitrary text into another writer's framed message is exactly the
 // defect class #885 closed for deliveries.
-export async function scheduleIdentitySetup(session: string, displayName: string, host: string | null = null): Promise<void> {
+export async function scheduleIdentitySetup(session: string, displayName: string, host: string | null = null, cliType: CliType = 'claude'): Promise<void> {
   setTimeout(() => {
     void (async () => {
       // Startup dialogs first: nothing below may reach the
@@ -4219,6 +4230,7 @@ export async function scheduleIdentitySetup(session: string, displayName: string
       } else {
         logger.info({ session }, 'Identity setup: modal dismissals skipped -- a delivery holds this pane send lane')
       }
+      if (cliType !== 'claude') return
       setTimeout(() => {
         void (async () => {
           // The /rename itself: retry-until-free rather than skip. The lane is
@@ -4841,7 +4853,11 @@ export async function sendPromptToSession(
     // #2144: once the wait budget is spent, the attempts count as used up, so a still-parked
     // prompt ends exactly as at the retry limit: decideSubmitFollowup's 'give-up' below.
     const budgetSpent = waitBudgetLeftMs <= 0
-    const action = decideSubmitFollowup(pane, payloadHint, attempt, budgetSpent ? attempt : SUBMIT_RETRY_MAX_ATTEMPTS)
+    const maxRetryAttempts =
+      pane && /(?:Starting MCP servers|tab to queue message)/i.test(pane)
+        ? Math.max(SUBMIT_RETRY_MAX_ATTEMPTS, 12)
+        : SUBMIT_RETRY_MAX_ATTEMPTS
+    const action = decideSubmitFollowup(pane, payloadHint, attempt, budgetSpent ? attempt : maxRetryAttempts)
     if (action === 'done') break
     if (action === 'give-up') {
       if (budgetSpent && attempt < SUBMIT_RETRY_MAX_ATTEMPTS) logger.warn({ session, attempt, waitBudgetMs: PRE_ENTER_WAIT_BUDGET_MS }, 'sendPromptToSession: pre-Enter wait budget spent; no further follow-ups')

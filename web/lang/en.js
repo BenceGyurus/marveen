@@ -1591,6 +1591,8 @@ window._i18n.en = {
   'agents.model.sonnet46':       'Sonnet 4.6 (fast and smart)',
   'agents.model.haiku55':        'Haiku 5.5 (newest Haiku, fastest)',
   'agents.model.haiku45':        'Haiku 4.5',
+  'agents.model.optgroup_codex': 'Codex (OpenAI)',
+  'agents.model.optgroup_agy':   'Antigravity (Google)',
   'agents.skills.empty':         'No skills added',
   'agents.skills.tab_title':              'Agent skills',
   'agents.page.analyze_btn':              'Model analysis',

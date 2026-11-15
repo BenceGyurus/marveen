@@ -1,7 +1,145 @@
-import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { encodeClaudeProjectDir } from '../claude-project-dir.js'
+
+const SAFE_CONV_ID_RX = /^[a-zA-Z0-9_-]{1,128}$/
+const SAFE_JSONL_FILE_RX = /^[a-zA-Z0-9._-]+\.jsonl$/
+
+/**
+ * Locate the newest Antigravity (`agy`) or Codex (`codex`) transcript JSONL for
+ * `workingDir`, or null when neither CLI has a session log for that workspace.
+ */
+export function findAltCliTranscriptForWorkingDir(
+  workingDir: string,
+  homeDirOverride?: string,
+  cliFilter?: 'agy' | 'codex',
+): { cli: 'agy' | 'codex'; file: string; mtimeMs: number } | null {
+  const isFilterInSecondArg = homeDirOverride === 'agy' || homeDirOverride === 'codex'
+  const effectiveFilter = cliFilter ?? (isFilterInSecondArg ? homeDirOverride : undefined)
+  const home = (!isFilterInSecondArg && homeDirOverride) ? homeDirOverride : homedir()
+  const candidates = new Set<string>([workingDir])
+  try { candidates.add(realpathSync(workingDir)) } catch { /* ignore */ }
+  let best: { cli: 'agy' | 'codex'; file: string; mtimeMs: number } | null = null
+
+  // 1. Antigravity: ~/.gemini/antigravity-cli/cache/last_conversations.json -> brain/<convId>/.system_generated/logs/transcript.jsonl
+  if (!effectiveFilter || effectiveFilter === 'agy') {
+    try {
+      const lastConvPath = join(home, '.gemini', 'antigravity-cli', 'cache', 'last_conversations.json')
+      const brainBase = join(home, '.gemini', 'antigravity-cli', 'brain')
+      if (existsSync(lastConvPath) && !lstatSync(lastConvPath).isSymbolicLink()) {
+        const map = JSON.parse(readFileSync(lastConvPath, 'utf-8')) as Record<string, unknown>
+        for (const dir of candidates) {
+          const convId = map[dir]
+          const cleanConvId = typeof convId === 'string' ? convId.trim() : ''
+          if (cleanConvId && SAFE_CONV_ID_RX.test(cleanConvId)) {
+            const transcript = join(brainBase, cleanConvId, '.system_generated', 'logs', 'transcript.jsonl')
+            if (existsSync(transcript)) {
+              const st = lstatSync(transcript)
+              if (st.isFile() && !st.isSymbolicLink()) {
+                if (!best || st.mtimeMs > best.mtimeMs) best = { cli: 'agy', file: transcript, mtimeMs: st.mtimeMs }
+              }
+            }
+          }
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 2. Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (check newest day dirs)
+  if (!effectiveFilter || effectiveFilter === 'codex') {
+    try {
+      const sessionsRoot = join(home, '.codex', 'sessions')
+      if (existsSync(sessionsRoot)) {
+        const years = readdirSync(sessionsRoot).filter(d => /^\d{4}$/.test(d)).sort().reverse()
+        outer: for (const y of years.slice(0, 2)) {
+          const yDir = join(sessionsRoot, y)
+          const months = readdirSync(yDir).filter(d => /^\d{2}$/.test(d)).sort().reverse()
+          for (const m of months.slice(0, 2)) {
+            const mDir = join(yDir, m)
+            const days = readdirSync(mDir).filter(d => /^\d{2}$/.test(d)).sort().reverse()
+            for (const d of days.slice(0, 3)) {
+              const dDir = join(mDir, d)
+              const files = readdirSync(dDir)
+                .filter(f => SAFE_JSONL_FILE_RX.test(f))
+                .map(f => {
+                  const full = join(dDir, f)
+                  const st = lstatSync(full)
+                  return { file: full, mtimeMs: st.mtimeMs, safe: st.isFile() && !st.isSymbolicLink() }
+                })
+                .filter(item => item.safe)
+                .sort((a, b) => b.mtimeMs - a.mtimeMs)
+              for (const item of files.slice(0, 15)) {
+                if (best && item.mtimeMs <= best.mtimeMs) continue
+                const fd = openSync(item.file, 'r')
+                let head = ''
+                try {
+                  const buf = Buffer.alloc(4096)
+                  const n = readSync(fd, buf, 0, 4096, 0)
+                  head = buf.toString('utf-8', 0, n)
+                } finally { closeSync(fd) }
+                const firstLine = head.split('\n')[0]?.trim()
+                if (!firstLine) continue
+                try {
+                  const meta = JSON.parse(firstLine)
+                  const cwd = meta?.payload?.cwd
+                  if (typeof cwd === 'string' && candidates.has(cwd)) {
+                    best = { cli: 'codex', file: item.file, mtimeMs: item.mtimeMs }
+                    break outer
+                  }
+                } catch { /* ignore */ }
+              }
+            }
+          }
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  return best
+}
+
+export function readAltCliActiveModel(workingDir: string, sinceUnixSec?: number, homeDirOverride?: string): string | null {
+  try {
+    const alt = findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride)
+    if (!alt) return null
+    const size = statSync(alt.file).size
+    const len = Math.min(size, 512 * 1024)
+    const fd = openSync(alt.file, 'r')
+    let text = ''
+    try {
+      const buf = Buffer.alloc(len)
+      const n = readSync(fd, buf, 0, len, size - len)
+      text = buf.toString('utf-8', 0, n)
+    } finally { closeSync(fd) }
+    const lines = text.split('\n')
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim()
+      if (!line.startsWith('{')) continue
+      try {
+        const entry = JSON.parse(line)
+        if (alt.cli === 'agy') {
+          const model = entry?.model
+          if (typeof model !== 'string' || !model.trim()) continue
+          if (sinceUnixSec !== undefined && typeof entry?.created_at === 'string') {
+            const lineUnix = Math.floor(new Date(entry.created_at).getTime() / 1000)
+            if (Number.isFinite(lineUnix) && lineUnix < sinceUnixSec) continue
+          }
+          return model.trim()
+        } else {
+          const model = entry?.type === 'turn_context' ? entry?.payload?.model : undefined
+          if (typeof model !== 'string' || !model.trim()) continue
+          if (sinceUnixSec !== undefined && typeof entry?.timestamp === 'string') {
+            const lineUnix = Math.floor(new Date(entry.timestamp).getTime() / 1000)
+            if (Number.isFinite(lineUnix) && lineUnix < sinceUnixSec) continue
+          }
+          return model.trim()
+        }
+      } catch { /* skip */ }
+    }
+  } catch { /* ignore */ }
+  return null
+}
 
 // Claude Code writes one .jsonl session log per session under
 // ~/.claude/projects/<encoded-working-dir>/. Every assistant turn carries the
@@ -150,16 +288,18 @@ export function readActiveModelFromProjectDir(workingDir: string, sinceUnixSec?:
   try {
     const dir = projectsDirFor(workingDir, configDir)
     if (!existsSync(dir)) {
-      cache.set(cacheKey, { value: null, expiresAt: now + TTL_MS })
-      return null
+      const altVal = configDir === undefined ? readAltCliActiveModel(workingDir, sinceUnixSec) : null
+      cache.set(cacheKey, { value: altVal, expiresAt: now + TTL_MS })
+      return altVal
     }
     const jsonls = readdirSync(dir)
       .filter(f => f.endsWith('.jsonl'))
       .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime)
     if (jsonls.length === 0) {
-      cache.set(cacheKey, { value: null, expiresAt: now + TTL_MS })
-      return null
+      const altVal = configDir === undefined ? readAltCliActiveModel(workingDir, sinceUnixSec) : null
+      cache.set(cacheKey, { value: altVal, expiresAt: now + TTL_MS })
+      return altVal
     }
     value = lastAnswerInTranscript<string>(`active-model:${sinceUnixSec ?? ''}`, join(dir, jsonls[0].f), (entry) => {
       const model = entry?.message?.model

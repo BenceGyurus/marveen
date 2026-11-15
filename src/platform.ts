@@ -69,6 +69,9 @@ export function tryResolveFromPath(name: string): string | null {
       const candidate = join(dir, name)
       if (existsSync(candidate)) return candidate
     }
+    if (name === 'codex' && existsSync('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')) {
+      return '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'
+    }
     return null
   }
 }

@@ -533,6 +533,8 @@ window._i18n.hu = {
   'agents.model.sonnet46':       'Sonnet 4.6 (gyors és okos)',
   'agents.model.haiku55':        'Haiku 5.5 (legújabb Haiku, leggyorsabb)',
   'agents.model.haiku45':        'Haiku 4.5',
+  'agents.model.optgroup_codex': 'Codex (OpenAI)',
+  'agents.model.optgroup_agy':   'Antigravity (Google)',
   'agents.skills.empty':         'Nincsenek skillek hozzáadva',
   'agents.skills.tab_title':              'Ügynök skilljei',
   'agents.page.analyze_btn':              'Modell elemzés',

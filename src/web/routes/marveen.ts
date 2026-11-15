@@ -21,6 +21,7 @@ import { configDirFor } from '../main-transcript-root.js'
 import type { RouteContext } from './types.js'
 import { logger } from '../../logger.js'
 import { reportNonColourSetting } from '../../css-color.js'
+import { getCliTypeForModel } from '../../cli-detector.js'
 
 // A colour setting as served to the dashboard; one that is not a CSS colour
 // is logged (once per value) -- the dashboard shows its default for it.
@@ -102,6 +103,7 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
       nickname: nicknameFor(currentBotName()),
       description,
       model: getActiveMarveenModel(),
+      cliType: getCliTypeForModel(getActiveMarveenModel()),
       tmuxSession: MAIN_CHANNELS_SESSION,
       running: true,
       // Auto-restart applies to the main channels session too; key it by the
