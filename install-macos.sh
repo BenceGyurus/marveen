@@ -655,7 +655,7 @@ _detect_cli_status() {
 
 _discover_models_for_cli() {
   local cli="$1"
-  python3 - "$cli" <<'PYEOF' 2>/dev/null || true
+  /usr/bin/python3 -I -S - "$cli" <<'PYEOF' 2>/dev/null || true
 import glob, json, os, re, shutil, subprocess, sys
 
 cli = sys.argv[1] if len(sys.argv) > 1 else 'claude'
@@ -889,11 +889,6 @@ elif ! command -v claude &>/dev/null; then
   fi
 fi
 [ "$ORCH_CLI" = "claude" ] && echo -e "  ${GREEN}✓${NC} Claude Code CLI"
-
-if [ -f "$INSTALL_DIR/scripts/install-headroom.sh" ]; then
-  echo -e "  Headroom AI (kontextus- es token-optimalizalas) telepitese..."
-  bash "$INSTALL_DIR/scripts/install-headroom.sh" || true
-fi
 
 INSTALL_STEP="claude-setup"
 # Step 2: Claude Code first-run flags (BEFORE auth login)
@@ -1420,6 +1415,11 @@ if [ "$_NPM_OK" != 1 ] || ! PATH="$NODE_BIN_DIR:$PATH" npm rebuild better-sqlite
 fi
 unset _NPM_OK
 ok "$(_t macos.npm_done)"
+
+if [ -f "$INSTALL_DIR/scripts/install-headroom.sh" ]; then
+  echo -e "  Headroom AI (kontextus- es token-optimalizalas) telepitese..."
+  bash "$INSTALL_DIR/scripts/install-headroom.sh" || true
+fi
 
 # Build TypeScript
 INSTALL_STEP="typescript-build"
