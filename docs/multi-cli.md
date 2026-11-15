@@ -23,14 +23,28 @@ A Marveen eredetileg kizárólag a Claude Code CLI-re épült. A Multi-CLI réte
 
 ## 🛠 Hogyan működik
 
-### 1. CLI-felismerés és modell-routing (`src/cli-detector.ts`)
+### 1. Moduláris CLI Provider Adapter Architektúra (`src/cli-providers.ts` & `src/cli-detector.ts`)
 
-A `getCliTypeForModel(model)` függvény dönti el, hogy egy adott modellazonosítót melyik CLI bináris (`claude`, `codex` vagy `agy`) futtasson:
+A CLI-specifikus viselkedés nem szóródik szét a kódbázisban: minden támogatott parancssori ügynök egy önálló **`CliProviderAdapter`** objektumként van regisztrálva a `registerCliProvider()` függvénnyel a `src/cli-providers.ts`-ben.
+
+Egy adapter egyetlen helyen definiálja az adott CLI összes tulajdonságát:
+- `id`, `displayName`, `binaryName`, `fallbackBinaryPaths`
+- `modelPrefixes` (pl. `['codex:', 'openai:']`) és `matchesModelFamily(lowerModelId)`
+- `instructionFiles` (pl. `['AGENTS.md']`, `['GEMINI.md', 'AGENTS.md']`)
+- `supportsClaudeChannelsFlag`, `supportsSlashRename`, `supportsSlashClear`
+- `discoverModels()` — dinamikus modellkatalógus-kiolvasás
+- `stampWorkspaceTrust(dir)` — munkakönyvtár előzetes megbízhatóvá tétele (`0o600` jogosultsággal)
+- `findTranscript(workingDir, homeDir)` — a munkakönyvtárhoz tartozó legfrissebb `.jsonl` munkamenet-napló megkeresése
+- `parseTranscriptLine(entry, clipText)` — egységes modell-, kontextustoken-, aktivitás- (`isTurnActivity`), idővonal- (`timelineItems`) és élő naplóesemény- (`transcriptEvents`) kinyerés
+
+> **Új CLI ügynök hozzáadása a jövőben:** Ha később egy negyedik CLI ügynököt (pl. `opencode`, `aider`, `goose`, `qwen-code`) szeretnél bekötni, elegendő egy új `CliProviderAdapter` objektumot regisztrálni a `registerCliProvider()` hívással a `src/cli-providers.ts`-ben — a teljes rendszer (`active-model`, `agent-transcript`, `agent-conversation`, `context-restart-gate`, `schedule-runner`, `agent-process`, `agent-worker`) automatikusan támogatni fogja.
+
+A `getCliTypeForModel(model)` függvény az alábbi sorrendben választja ki a megfelelő adaptert:
 
 1. **Explicit előtagok:** `codex:<id>` / `openai:<id>` → `codex`; `agy:<id>` / `antigravity:<id>` → `agy`; `claude:<id>` → `claude`.
 2. **OpenRouter formátum (`provider/model`):** mindig `claude` (Anthropic-kompatibilis végponton keresztül).
-3. **Dinamikusan felderített katalógusok:** a `getCodexAvailableModels()` és `getAgyAvailableModels()` által futásidőben betöltött modellazonosítók halmaza (`knownCodexModelIds`, `knownAgyModelIds`).
-4. **Családminták (fallback):** `gemini-*`, `antigravity-*` → `agy`; `gpt-*`, `o1*`, `o3*`, `o4*`, `codex*` → `codex`; minden egyéb → `claude`.
+3. **Dinamikusan felderített katalógusok:** a regisztrált providerek `discoverModels()` hívása által betöltött modellazonosítók.
+4. **Családminták (`matchesModelFamily`):** `gemini-*`, `antigravity-*` → `agy`; `gpt-*`, `o1*`, `o3*`, `o4*`, `codex*` → `codex`; minden egyéb → `claude`.
 
 ### 2. Dinamikus modellfelderítés
 

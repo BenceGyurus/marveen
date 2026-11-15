@@ -1,99 +1,31 @@
-import { closeSync, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { encodeClaudeProjectDir } from '../claude-project-dir.js'
-
-const SAFE_CONV_ID_RX = /^[a-zA-Z0-9_-]{1,128}$/
-const SAFE_JSONL_FILE_RX = /^[a-zA-Z0-9._-]+\.jsonl$/
+import { getCliProvider, listNonClaudeCliProviders, type CliType } from '../cli-detector.js'
 
 /**
- * Locate the newest Antigravity (`agy`) or Codex (`codex`) transcript JSONL for
- * `workingDir`, or null when neither CLI has a session log for that workspace.
+ * Locate the newest non-Claude CLI (`agy`, `codex`, or any registered provider)
+ * transcript JSONL for `workingDir`, or null when none has a session log for that workspace.
  */
 export function findAltCliTranscriptForWorkingDir(
   workingDir: string,
   homeDirOverride?: string,
-  cliFilter?: 'agy' | 'codex',
-): { cli: 'agy' | 'codex'; file: string; mtimeMs: number } | null {
+  cliFilter?: CliType,
+): { cli: CliType; file: string; mtimeMs: number } | null {
   const isFilterInSecondArg = homeDirOverride === 'agy' || homeDirOverride === 'codex'
-  const effectiveFilter = cliFilter ?? (isFilterInSecondArg ? homeDirOverride : undefined)
-  const home = (!isFilterInSecondArg && homeDirOverride) ? homeDirOverride : homedir()
-  const candidates = new Set<string>([workingDir])
-  try { candidates.add(realpathSync(workingDir)) } catch { /* ignore */ }
-  let best: { cli: 'agy' | 'codex'; file: string; mtimeMs: number } | null = null
+  const effectiveFilter = cliFilter ?? (isFilterInSecondArg ? (homeDirOverride as CliType) : undefined)
+  const explicitHome = !isFilterInSecondArg && homeDirOverride ? homeDirOverride : undefined
+  if (process.env.VITEST && !explicitHome) return null
+  const home = explicitHome ?? homedir()
+  let best: { cli: CliType; file: string; mtimeMs: number } | null = null
 
-  // 1. Antigravity: ~/.gemini/antigravity-cli/cache/last_conversations.json -> brain/<convId>/.system_generated/logs/transcript.jsonl
-  if (!effectiveFilter || effectiveFilter === 'agy') {
-    try {
-      const lastConvPath = join(home, '.gemini', 'antigravity-cli', 'cache', 'last_conversations.json')
-      const brainBase = join(home, '.gemini', 'antigravity-cli', 'brain')
-      if (existsSync(lastConvPath) && !lstatSync(lastConvPath).isSymbolicLink()) {
-        const map = JSON.parse(readFileSync(lastConvPath, 'utf-8')) as Record<string, unknown>
-        for (const dir of candidates) {
-          const convId = map[dir]
-          const cleanConvId = typeof convId === 'string' ? convId.trim() : ''
-          if (cleanConvId && SAFE_CONV_ID_RX.test(cleanConvId)) {
-            const transcript = join(brainBase, cleanConvId, '.system_generated', 'logs', 'transcript.jsonl')
-            if (existsSync(transcript)) {
-              const st = lstatSync(transcript)
-              if (st.isFile() && !st.isSymbolicLink()) {
-                if (!best || st.mtimeMs > best.mtimeMs) best = { cli: 'agy', file: transcript, mtimeMs: st.mtimeMs }
-              }
-            }
-          }
-        }
-      }
-    } catch { /* ignore */ }
-  }
-
-  // 2. Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (check newest day dirs)
-  if (!effectiveFilter || effectiveFilter === 'codex') {
-    try {
-      const sessionsRoot = join(home, '.codex', 'sessions')
-      if (existsSync(sessionsRoot)) {
-        const years = readdirSync(sessionsRoot).filter(d => /^\d{4}$/.test(d)).sort().reverse()
-        outer: for (const y of years.slice(0, 2)) {
-          const yDir = join(sessionsRoot, y)
-          const months = readdirSync(yDir).filter(d => /^\d{2}$/.test(d)).sort().reverse()
-          for (const m of months.slice(0, 2)) {
-            const mDir = join(yDir, m)
-            const days = readdirSync(mDir).filter(d => /^\d{2}$/.test(d)).sort().reverse()
-            for (const d of days.slice(0, 3)) {
-              const dDir = join(mDir, d)
-              const files = readdirSync(dDir)
-                .filter(f => SAFE_JSONL_FILE_RX.test(f))
-                .map(f => {
-                  const full = join(dDir, f)
-                  const st = lstatSync(full)
-                  return { file: full, mtimeMs: st.mtimeMs, safe: st.isFile() && !st.isSymbolicLink() }
-                })
-                .filter(item => item.safe)
-                .sort((a, b) => b.mtimeMs - a.mtimeMs)
-              for (const item of files.slice(0, 15)) {
-                if (best && item.mtimeMs <= best.mtimeMs) continue
-                const fd = openSync(item.file, 'r')
-                let head = ''
-                try {
-                  const buf = Buffer.alloc(4096)
-                  const n = readSync(fd, buf, 0, 4096, 0)
-                  head = buf.toString('utf-8', 0, n)
-                } finally { closeSync(fd) }
-                const firstLine = head.split('\n')[0]?.trim()
-                if (!firstLine) continue
-                try {
-                  const meta = JSON.parse(firstLine)
-                  const cwd = meta?.payload?.cwd
-                  if (typeof cwd === 'string' && candidates.has(cwd)) {
-                    best = { cli: 'codex', file: item.file, mtimeMs: item.mtimeMs }
-                    break outer
-                  }
-                } catch { /* ignore */ }
-              }
-            }
-          }
-        }
-      }
-    } catch { /* ignore */ }
+  for (const provider of listNonClaudeCliProviders()) {
+    if (effectiveFilter && provider.id !== effectiveFilter) continue
+    const found = provider.findTranscript(workingDir, home)
+    if (found && (!best || found.mtimeMs > best.mtimeMs)) {
+      best = { cli: provider.id, file: found.file, mtimeMs: found.mtimeMs }
+    }
   }
 
   return best
@@ -103,6 +35,7 @@ export function readAltCliActiveModel(workingDir: string, sinceUnixSec?: number,
   try {
     const alt = findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride)
     if (!alt) return null
+    const provider = getCliProvider(alt.cli)
     const size = statSync(alt.file).size
     const len = Math.min(size, 512 * 1024)
     const fd = openSync(alt.file, 'r')
@@ -117,24 +50,14 @@ export function readAltCliActiveModel(workingDir: string, sinceUnixSec?: number,
       const line = lines[i].trim()
       if (!line.startsWith('{')) continue
       try {
-        const entry = JSON.parse(line)
-        if (alt.cli === 'agy') {
-          const model = entry?.model
-          if (typeof model !== 'string' || !model.trim()) continue
-          if (sinceUnixSec !== undefined && typeof entry?.created_at === 'string') {
-            const lineUnix = Math.floor(new Date(entry.created_at).getTime() / 1000)
-            if (Number.isFinite(lineUnix) && lineUnix < sinceUnixSec) continue
-          }
-          return model.trim()
-        } else {
-          const model = entry?.type === 'turn_context' ? entry?.payload?.model : undefined
-          if (typeof model !== 'string' || !model.trim()) continue
-          if (sinceUnixSec !== undefined && typeof entry?.timestamp === 'string') {
-            const lineUnix = Math.floor(new Date(entry.timestamp).getTime() / 1000)
-            if (Number.isFinite(lineUnix) && lineUnix < sinceUnixSec) continue
-          }
-          return model.trim()
+        const entry = JSON.parse(line) as Record<string, unknown>
+        const parsed = provider.parseTranscriptLine(entry)
+        if (!parsed.model) continue
+        if (sinceUnixSec !== undefined && parsed.tsMs !== null) {
+          const lineUnix = Math.floor(parsed.tsMs / 1000)
+          if (lineUnix < sinceUnixSec) continue
         }
+        return parsed.model
       } catch { /* skip */ }
     }
   } catch { /* ignore */ }
@@ -286,9 +209,10 @@ export function readActiveModelFromProjectDir(workingDir: string, sinceUnixSec?:
   if (cached && cached.expiresAt > now) return cached.value
   let value: string | null = null
   try {
+    const alt = configDir === undefined ? findAltCliTranscriptForWorkingDir(workingDir) : null
     const dir = projectsDirFor(workingDir, configDir)
     if (!existsSync(dir)) {
-      const altVal = configDir === undefined ? readAltCliActiveModel(workingDir, sinceUnixSec) : null
+      const altVal = alt ? readAltCliActiveModel(workingDir, sinceUnixSec) : null
       cache.set(cacheKey, { value: altVal, expiresAt: now + TTL_MS })
       return altVal
     }
@@ -296,8 +220,8 @@ export function readActiveModelFromProjectDir(workingDir: string, sinceUnixSec?:
       .filter(f => f.endsWith('.jsonl'))
       .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime)
-    if (jsonls.length === 0) {
-      const altVal = configDir === undefined ? readAltCliActiveModel(workingDir, sinceUnixSec) : null
+    if (jsonls.length === 0 || (alt && alt.mtimeMs > jsonls[0].mtime)) {
+      const altVal = alt ? readAltCliActiveModel(workingDir, sinceUnixSec) : null
       cache.set(cacheKey, { value: altVal, expiresAt: now + TTL_MS })
       return altVal
     }
@@ -322,14 +246,30 @@ export function readActiveModelFromProjectDir(workingDir: string, sinceUnixSec?:
 // /model sent after it has not been measured yet (ELSOKOR922 Phase 7 A-smoke:
 // the hold reverted to sonnet at 14:52, /model at 14:53 still read "opus" from
 // the 14:47 turn, with nothing saying the reading was stale).
-export function readLastAssistantModel(workingDir: string, configDir?: string): { model: string; atMs: number } | null {
+export function readLastAssistantModel(workingDir: string, configDir?: string, homeDirOverride?: string): { model: string; atMs: number } | null {
   try {
+    const alt = configDir === undefined ? findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride) : null
     const dir = projectsDirFor(workingDir, configDir)
-    if (!existsSync(dir)) return null
-    const newest = readdirSync(dir)
-      .filter(f => f.endsWith('.jsonl'))
-      .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime)[0]
+    const newest = existsSync(dir)
+      ? readdirSync(dir)
+          .filter(f => f.endsWith('.jsonl'))
+          .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
+          .sort((a, b) => b.mtime - a.mtime)[0]
+      : undefined
+    if (alt && (!newest || alt.mtimeMs > newest.mtime)) {
+      const provider = getCliProvider(alt.cli)
+      const lines = readFileSync(alt.file, 'utf-8').split('\n')
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim()
+        if (!line.startsWith('{')) continue
+        try {
+          const parsed = provider.parseTranscriptLine(JSON.parse(line) as Record<string, unknown>)
+          if (parsed.model && parsed.tsMs !== null) {
+            return { model: parsed.model, atMs: parsed.tsMs }
+          }
+        } catch { /* skip */ }
+      }
+    }
     if (!newest) return null
     const lines = readFileSync(join(dir, newest.f), 'utf-8').split('\n')
     for (let i = lines.length - 1; i >= 0; i--) {
@@ -370,14 +310,39 @@ function isLocalCommandLine(e: { type?: unknown; message?: { content?: unknown }
   return typeof c === 'string' && /^\s*<(local-command-(stdout|stderr|caveat)|command-name)>/.test(c)
 }
 
-export function readLastTurnActivityMs(workingDir: string, configDir?: string): number | null {
+export function readLastTurnActivityMs(workingDir: string, configDir?: string, homeDirOverride?: string): number | null {
   try {
+    const alt = configDir === undefined ? findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride) : null
     const dir = projectsDirFor(workingDir, configDir)
-    if (!existsSync(dir)) return null
-    const newest = readdirSync(dir)
-      .filter(f => f.endsWith('.jsonl'))
-      .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs, size: statSync(join(dir, f)).size }))
-      .sort((a, b) => b.mtime - a.mtime)[0]
+    const newest = existsSync(dir)
+      ? readdirSync(dir)
+          .filter(f => f.endsWith('.jsonl'))
+          .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs, size: statSync(join(dir, f)).size }))
+          .sort((a, b) => b.mtime - a.mtime)[0]
+      : undefined
+    if (alt && (!newest || alt.mtimeMs > newest.mtime)) {
+      const provider = getCliProvider(alt.cli)
+      const altSize = statSync(alt.file).size
+      const fd = openSync(alt.file, 'r')
+      let text: string
+      try {
+        const len = Math.min(altSize, TURN_TAIL_BYTES)
+        const buf = Buffer.alloc(len)
+        readSync(fd, buf, 0, len, altSize - len)
+        text = buf.toString('utf-8')
+      } finally { closeSync(fd) }
+      const lines = text.split('\n')
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim()
+        if (!line.startsWith('{')) continue
+        try {
+          const parsed = provider.parseTranscriptLine(JSON.parse(line) as Record<string, unknown>)
+          if (parsed.isTurnActivity && parsed.tsMs !== null) return parsed.tsMs
+        } catch { /* skip */ }
+      }
+      if (altSize <= TURN_TAIL_BYTES) return 0
+      return null
+    }
     if (!newest) return null
     const fd = openSync(join(dir, newest.f), 'r')
     let text: string
@@ -420,30 +385,37 @@ const ctxCache = new Map<string, { value: number | null; expiresAt: number }>()
 // null when there is no transcript / no usage yet (fresh session). This is what
 // the dashboard surfaces so the operator can see a session growing heavy and
 // decide to restart it.
-export function readContextTokensFromProjectDir(workingDir: string, configDir?: string): number | null {
+export function readContextTokensFromProjectDir(workingDir: string, configDir?: string, homeDirOverride?: string): number | null {
   const now = Date.now()
-  const cacheKey = `${workingDir}:${configDir ?? ''}`
+  const cacheKey = `${workingDir}:${configDir ?? ''}:${homeDirOverride ?? ''}`
   const cached = ctxCache.get(cacheKey)
   if (cached && cached.expiresAt > now) return cached.value
   let value: number | null = null
   try {
+    const alt = configDir === undefined ? findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride) : null
     const dir = projectsDirFor(workingDir, configDir)
-    if (existsSync(dir)) {
-      const jsonls = readdirSync(dir)
-        .filter(f => f.endsWith('.jsonl'))
-        .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
-        .sort((a, b) => b.mtime - a.mtime)
-      if (jsonls.length > 0) {
-        value = lastAnswerInTranscript<number>('context-tokens', join(dir, jsonls[0].f), (entry) => {
-          const u = entry?.message?.usage
-          if (!u || typeof u !== 'object') return undefined
-          const inp = Number(u.input_tokens) || 0
-          const cr = Number(u.cache_read_input_tokens) || 0
-          const cc = Number(u.cache_creation_input_tokens) || 0
-          const total = inp + cr + cc
-          return total > 0 ? total : undefined
-        })
-      }
+    const jsonls = existsSync(dir)
+      ? readdirSync(dir)
+          .filter(f => f.endsWith('.jsonl'))
+          .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
+          .sort((a, b) => b.mtime - a.mtime)
+      : []
+    if (alt && (jsonls.length === 0 || alt.mtimeMs > jsonls[0].mtime)) {
+      const provider = getCliProvider(alt.cli)
+      value = lastAnswerInTranscript<number>('context-tokens', alt.file, (entry) => {
+        const parsed = provider.parseTranscriptLine((entry ?? {}) as Record<string, unknown>)
+        return parsed.contextTokens
+      })
+    } else if (jsonls.length > 0) {
+      value = lastAnswerInTranscript<number>('context-tokens', join(dir, jsonls[0].f), (entry) => {
+        const u = entry?.message?.usage
+        if (!u || typeof u !== 'object') return undefined
+        const inp = Number(u.input_tokens) || 0
+        const cr = Number(u.cache_read_input_tokens) || 0
+        const cc = Number(u.cache_creation_input_tokens) || 0
+        const total = inp + cr + cc
+        return total > 0 ? total : undefined
+      })
     }
   } catch { /* fall through */ }
   ctxCache.set(cacheKey, { value, expiresAt: now + TTL_MS })
@@ -471,15 +443,20 @@ export function readContextTokensFromProjectDir(workingDir: string, configDir?: 
  * the newest file; this exposes it rather than recomputing the selection
  * differently, so the two always describe the SAME transcript.
  */
-export function readTranscriptMtimeFromProjectDir(workingDir: string, configDir?: string): number | null {
+export function readTranscriptMtimeFromProjectDir(workingDir: string, configDir?: string, homeDirOverride?: string): number | null {
   try {
-    const dir = projectsDirFor(workingDir, configDir)
-    if (!existsSync(dir)) return null
     let newest: number | null = null
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith('.jsonl')) continue
-      const m = statSync(join(dir, f)).mtimeMs
-      if (newest === null || m > newest) newest = m
+    const dir = projectsDirFor(workingDir, configDir)
+    if (existsSync(dir)) {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith('.jsonl')) continue
+        const m = statSync(join(dir, f)).mtimeMs
+        if (newest === null || m > newest) newest = m
+      }
+    }
+    if (configDir === undefined) {
+      const alt = findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride)
+      if (alt && (newest === null || alt.mtimeMs > newest)) newest = alt.mtimeMs
     }
     return newest
   } catch { return null }
@@ -505,19 +482,25 @@ export function readTranscriptTailFromProjectDir(
   workingDir: string,
   configDir?: string,
   maxBytes: number = TRANSCRIPT_TAIL_BYTES,
+  homeDirOverride?: string,
 ): string | null {
   try {
+    const alt = configDir === undefined ? findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride) : null
     const dir = projectsDirFor(workingDir, configDir)
-    if (!existsSync(dir)) return null
-    let newest: { f: string; m: number } | null = null
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith('.jsonl')) continue
-      let m: number
-      try { m = statSync(join(dir, f)).mtimeMs } catch { continue }
-      if (newest === null || m > newest.m) newest = { f, m }
+    let newest: { path: string; m: number } | null = null
+    if (existsSync(dir)) {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith('.jsonl')) continue
+        let m: number
+        try { m = statSync(join(dir, f)).mtimeMs } catch { continue }
+        if (newest === null || m > newest.m) newest = { path: join(dir, f), m }
+      }
+    }
+    if (alt && (newest === null || alt.mtimeMs > newest.m)) {
+      newest = { path: alt.file, m: alt.mtimeMs }
     }
     if (newest === null) return null
-    const fd = openSync(join(dir, newest.f), 'r')
+    const fd = openSync(newest.path, 'r')
     try {
       const size = fstatSync(fd).size
       const len = Math.min(size, maxBytes)
@@ -587,16 +570,23 @@ export function readLastConversationTsFromProjectDir(
   workingDir: string,
   configDir?: string,
   tailBytes = 512 * 1024,
+  homeDirOverride?: string,
 ): number | null {
   try {
+    const alt = configDir === undefined ? findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride) : null
     const dir = projectsDirFor(workingDir, configDir)
-    if (!existsSync(dir)) return null
     let newestFile: string | null = null
     let newestMtime = -1
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith('.jsonl')) continue
-      const m = statSync(join(dir, f)).mtimeMs
-      if (m > newestMtime) { newestMtime = m; newestFile = join(dir, f) }
+    if (existsSync(dir)) {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith('.jsonl')) continue
+        const m = statSync(join(dir, f)).mtimeMs
+        if (m > newestMtime) { newestMtime = m; newestFile = join(dir, f) }
+      }
+    }
+    if (alt && alt.mtimeMs > newestMtime) {
+      newestMtime = alt.mtimeMs
+      newestFile = alt.file
     }
     if (newestFile === null) return null
 
@@ -625,7 +615,7 @@ export function readLastConversationTsFromProjectDir(
         if (!line.startsWith('{')) continue
         let o: Record<string, unknown>
         try { o = JSON.parse(line) as Record<string, unknown> } catch { continue }
-        const ts = o.timestamp
+        const ts = typeof o.timestamp === 'string' ? o.timestamp : (typeof o.created_at === 'string' ? o.created_at : null)
         if (typeof ts !== 'string') continue
         const ms = Date.parse(ts)
         if (Number.isFinite(ms) && (newest === null || ms > newest)) newest = ms

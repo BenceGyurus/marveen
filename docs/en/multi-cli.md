@@ -23,14 +23,28 @@ Marveen originally targeted Claude Code exclusively. The Multi-CLI layer extends
 
 ## 🛠 How It Works
 
-### 1. CLI Detection & Model Routing (`src/cli-detector.ts`)
+### 1. Modular CLI Provider Adapter Architecture (`src/cli-providers.ts` & `src/cli-detector.ts`)
 
-`getCliTypeForModel(model)` routes any model identifier to `claude`, `codex`, or `agy`:
+CLI-specific behavior is encapsulated in `src/cli-providers.ts` behind the **`CliProviderAdapter`** contract and registered via `registerCliProvider()`.
+
+Each adapter defines in one place:
+- `id`, `displayName`, `binaryName`, `fallbackBinaryPaths`
+- `modelPrefixes` and `matchesModelFamily(lowerModelId)`
+- `instructionFiles` (`['AGENTS.md']`, `['GEMINI.md', 'AGENTS.md']`, etc.)
+- `supportsClaudeChannelsFlag`, `supportsSlashRename`, `supportsSlashClear`
+- `discoverModels()` — runtime model catalog extraction
+- `stampWorkspaceTrust(dir)` — pre-trusting the workspace (`0o600` permissions)
+- `findTranscript(workingDir, homeDir)` — locating the newest `.jsonl` transcript for a workspace
+- `parseTranscriptLine(entry, clipText)` — unified extraction of active model, context tokens, turn activity (`isTurnActivity`), conversation timeline items, and live transcript events
+
+> **Adding a new CLI agent in the future:** Registering a new agent (e.g. `opencode`, `aider`, `goose`) only requires implementing `CliProviderAdapter` and calling `registerCliProvider()` in `src/cli-providers.ts`.
+
+`getCliTypeForModel(model)` resolves any model identifier in order:
 
 1. **Explicit prefixes:** `codex:<id>` / `openai:<id>` → `codex`; `agy:<id>` / `antigravity:<id>` → `agy`; `claude:<id>` → `claude`.
 2. **OpenRouter slugs (`provider/model`):** Routed to `claude` via the Anthropic-compatible endpoint.
-3. **Dynamically discovered catalogs:** Checked against `knownCodexModelIds` and `knownAgyModelIds` populated by `getCodexAvailableModels()` and `getAgyAvailableModels()`.
-4. **Family prefix fallback:** `gemini-*`, `antigravity-*` → `agy`; `gpt-*`, `o1*`, `o3*`, `o4*`, `codex*` → `codex`; everything else → `claude`.
+3. **Dynamically discovered catalogs:** Checked against models registered by each provider's `discoverModels()`.
+4. **Family matchers (`matchesModelFamily`):** `gemini-*`, `antigravity-*` → `agy`; `gpt-*`, `o1*`, `o3*`, `o4*`, `codex*` → `codex`; everything else → `claude`.
 
 ### 2. Dynamic Model Extraction
 

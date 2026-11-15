@@ -126,7 +126,7 @@ const tmuxBin = makeLazyBinResolver('tmux')
 const claudeBin = makeLazyBinResolver('claude')
 const codexBin = makeLazyBinResolver('codex')
 const agyBin = makeLazyBinResolver('agy')
-import { getCliTypeForModel, stripCliModelPrefix, prepareWorkspaceForCli, type CliType } from '../cli-detector.js'
+import { getCliTypeForModel, getCliProvider, stripCliModelPrefix, prepareWorkspaceForCli, type CliType } from '../cli-detector.js'
 
 // Shared async pacing helper. Replaces the blocking synchronous `/bin/sleep`
 // (execFileSync) pauses in the tmux-driving injection hot-path so a pacing wait
@@ -4230,7 +4230,7 @@ export async function scheduleIdentitySetup(session: string, displayName: string
       } else {
         logger.info({ session }, 'Identity setup: modal dismissals skipped -- a delivery holds this pane send lane')
       }
-      if (cliType !== 'claude') return
+      if (!getCliProvider(cliType).supportsSlashRename) return
       setTimeout(() => {
         void (async () => {
           // The /rename itself: retry-until-free rather than skip. The lane is

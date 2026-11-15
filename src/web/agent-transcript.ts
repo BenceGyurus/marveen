@@ -3,7 +3,8 @@ import { join } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
 import { SECRET_PATTERNS } from '../security/secret-gate.js'
 import { readFileOr } from './agent-config.js'
-import { projectsDirFor } from './active-model.js'
+import { projectsDirFor, findAltCliTranscriptForWorkingDir } from './active-model.js'
+import { listNonClaudeCliProviders } from '../cli-detector.js'
 
 // Read-only window into an agent's live session log, for operators who need to
 // answer one question: is this agent working, or is it stuck?
@@ -176,6 +177,17 @@ function blockText(block: unknown): string {
 function eventsFromLine(line: string): TranscriptEvent[] {
   let entry: Record<string, unknown>
   try { entry = JSON.parse(line) as Record<string, unknown> } catch { return [] }
+  for (const provider of listNonClaudeCliProviders()) {
+    const parsed = provider.parseTranscriptLine(entry)
+    if (parsed.transcriptEvents.length > 0) {
+      return parsed.transcriptEvents.map(ev => ({
+        ts: ev.ts,
+        tipus: ev.tipus,
+        nev: ev.nev,
+        szoveg: maskSecrets(ev.szoveg),
+      }))
+    }
+  }
   const ts = typeof entry.timestamp === 'string' ? entry.timestamp : null
   const msg = entry.message as Record<string, unknown> | undefined
   const content = msg?.content
@@ -221,7 +233,16 @@ export interface ReadTranscriptOptions {
 export function readAgentTranscript(agentName: string, opts: ReadTranscriptOptions): TranscriptResult {
   const tailBytes = Math.min(MAX_TAIL_BYTES, Math.max(1_000, opts.tailBytes ?? DEFAULT_TAIL_BYTES))
   const dir = projectsDirFor(opts.workingDir, opts.configDir)
-  const file = newestSessionFile(dir)
+  let file = newestSessionFile(dir)
+  if (!opts.configDir) {
+    const alt = findAltCliTranscriptForWorkingDir(opts.workingDir)
+    if (alt) {
+      const claudeMtime = file ? (() => { try { return statSync(file.path).mtimeMs } catch { return -1 } })() : -1
+      if (alt.mtimeMs > claudeMtime) {
+        file = { path: alt.file, name: alt.file.split('/').pop() ?? 'transcript.jsonl' }
+      }
+    }
+  }
   const empty: TranscriptResult = {
     agent: agentName,
     session: null,

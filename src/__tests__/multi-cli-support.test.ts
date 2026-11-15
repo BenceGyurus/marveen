@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   getCliTypeForModel,
+  getCliProvider,
+  listCliProviders,
+  listNonClaudeCliProviders,
   stripCliModelPrefix,
   getCodexAvailableModels,
   getAgyAvailableModels,
@@ -19,7 +22,16 @@ import {
   firstRunAcceptKeys,
 } from '../pane-state.js'
 import { buildRemoteLaunchCommand } from '../web/ssh-tmux.js'
-import { findAltCliTranscriptForWorkingDir, readAltCliActiveModel } from '../web/active-model.js'
+import {
+  findAltCliTranscriptForWorkingDir,
+  readAltCliActiveModel,
+  readLastAssistantModel,
+  readLastTurnActivityMs,
+  readContextTokensFromProjectDir,
+  readTranscriptMtimeFromProjectDir,
+  readTranscriptTailFromProjectDir,
+  readLastConversationTsFromProjectDir,
+} from '../web/active-model.js'
 
 describe('cli-detector: model to CLI routing and dynamic model extraction', () => {
   it('routes Claude, DeepSeek, MiniMax, OpenRouter, Ollama and custom providers to claude', () => {
@@ -263,12 +275,39 @@ describe('active-model: Antigravity and Codex transcript readers', () => {
         [
           JSON.stringify({ timestamp: '2026-11-15T18:01:00Z', type: 'session_meta', payload: { cwd: codexWorkdir } }),
           JSON.stringify({ timestamp: '2026-11-15T18:01:01Z', type: 'turn_context', payload: { cwd: codexWorkdir, model: 'gpt-5.4' } }),
+          JSON.stringify({
+            timestamp: '2026-11-15T18:01:02Z',
+            type: 'response_item',
+            payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Rendben!' }] },
+          }),
+          JSON.stringify({
+            timestamp: '2026-11-15T18:01:03Z',
+            type: 'event_msg',
+            payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 12000, cached_input_tokens: 3000, total_tokens: 15400 } } },
+          }),
         ].join('\n') + '\n',
       )
 
       const foundCodex = findAltCliTranscriptForWorkingDir(codexWorkdir, fakeHome)
       expect(foundCodex?.cli).toBe('codex')
       expect(readAltCliActiveModel(codexWorkdir, undefined, fakeHome)).toBe('gpt-5.4')
+      expect(readLastAssistantModel(codexWorkdir, undefined, fakeHome)?.model).toBe('gpt-5.4')
+      expect(readLastTurnActivityMs(codexWorkdir, undefined, fakeHome)).toBe(Date.parse('2026-11-15T18:01:02Z'))
+      expect(readContextTokensFromProjectDir(codexWorkdir, undefined, fakeHome)).toBe(15400)
+      expect(readTranscriptMtimeFromProjectDir(codexWorkdir, undefined, fakeHome)).toBeGreaterThan(0)
+      expect(readTranscriptTailFromProjectDir(codexWorkdir, undefined, 4096, fakeHome)).toContain('Rendben!')
+      expect(readLastConversationTsFromProjectDir(codexWorkdir, undefined, 4096, fakeHome)).toBe(Date.parse('2026-11-15T18:01:03Z'))
+
+      expect(readLastAssistantModel(agyWorkdir, undefined, fakeHome)?.model).toBe('gemini-2.5-flash')
+      expect(readLastTurnActivityMs(agyWorkdir, undefined, fakeHome)).toBe(Date.parse('2026-11-15T18:00:02Z'))
+      expect(readLastConversationTsFromProjectDir(agyWorkdir, undefined, 4096, fakeHome)).toBe(Date.parse('2026-11-15T18:00:02Z'))
+
+      // 3. Provider registry contract
+      expect(listCliProviders().map(p => p.id)).toEqual(['claude', 'codex', 'agy'])
+      expect(listNonClaudeCliProviders().map(p => p.id)).toEqual(['codex', 'agy'])
+      expect(getCliProvider('claude').supportsClaudeChannelsFlag).toBe(true)
+      expect(getCliProvider('codex').supportsClaudeChannelsFlag).toBe(false)
+      expect(getCliProvider('agy').supportsClaudeChannelsFlag).toBe(false)
     } finally {
       rmSync(fakeHome, { recursive: true, force: true })
     }

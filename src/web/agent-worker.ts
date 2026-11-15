@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { homedir, tmpdir, userInfo } from 'node:os'
 import { createHash } from 'node:crypto'
 import { resolveFromPath, tryResolveFromPath } from '../platform.js'
-import { getCliTypeForModel, stripCliModelPrefix, stampAgyWorkspaceTrust, stampCodexWorkspaceTrust } from '../cli-detector.js'
+import { getCliTypeForModel, getCliProvider, stripCliModelPrefix, stampAgyWorkspaceTrust, stampCodexWorkspaceTrust } from '../cli-detector.js'
 import { logger } from '../logger.js'
 import { launchableInstallDefaultSync, launchableDistributionDefaultSync } from './default-model-guard.js'
 import { measureClaudeCliVersionSync } from './claude-cli-version.js'
@@ -954,7 +954,7 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
     (getCliTypeForModel(workerModel) === 'codex'
       ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${shArg(tryResolveFromPath('codex') ?? 'codex')} --dangerously-bypass-approvals-and-sandbox --no-alt-screen${stripCliModelPrefix(workerModel) ? ` -m ${shArg(stripCliModelPrefix(workerModel))}` : ''}`
       : getCliTypeForModel(workerModel) === 'agy'
-        ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${shArg(tryResolveFromPath('agy') ?? 'agy')} chat --mode agent -y --no-persist${stripCliModelPrefix(workerModel) ? ` --model ${shArg(stripCliModelPrefix(workerModel))}` : ''}`
+        ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${shArg(tryResolveFromPath('agy') ?? 'agy')} --dangerously-skip-permissions --mode auto${stripCliModelPrefix(workerModel) ? ` --model ${shArg(stripCliModelPrefix(workerModel))}` : ''}`
         : `${shArg(claudeLaunchBin)} --dangerously-skip-permissions --model ${shArg(workerModel)} ` +
           // WORKERMCPSEND1104 part 2: only the servers in the worker's own MCP config, nothing from any other source.
           `--strict-mcp-config --mcp-config ${shArg(workerMcpConfigPath(ctx))}`)
@@ -1151,7 +1151,7 @@ function restartWorkerSession(ctx: WorkerCtx): void {
 // Reset context between requests so unrelated one-shots never share/grow context.
 function clearWorkerContext(ctx: WorkerCtx): void {
   const effectiveModel = ctx.modelOverride ?? WORKER_MODEL_OVERRIDE ?? DEFAULT_AGENT_MODEL
-  if (getCliTypeForModel(effectiveModel) !== 'claude') return
+  if (!getCliProvider(getCliTypeForModel(effectiveModel)).supportsSlashClear) return
   try {
     execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(ctx.session), '-l', '/clear'], { timeout: 5000 })
     execFileSync('/bin/sleep', ['0.2'], { timeout: 2000 })

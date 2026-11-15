@@ -156,6 +156,9 @@ export function decideHasPluginAlive(ctx: PluginAliveContext): boolean {
     childrenOf.set(ppid, arr)
   }
 
+  const rootCmd = cmdOf.get(claudePid) || ''
+  if (/(?:^|\/)(?:codex|agy)(?:\s|$)/.test(rootCmd)) return true
+
   const stack = [claudePid]
   const seen = new Set<number>()
   while (stack.length) {
