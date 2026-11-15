@@ -1,5 +1,5 @@
 import { readPlanTokenStatus, type PlanTokenLaunchStatus } from '../plan-token-launch.js'
-import { isSingleLineEnvValue } from '../../env.js'
+import { isSingleLineEnvValue, updateEnvFile } from '../../env.js'
 import { existsSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync, copyFileSync } from 'node:fs'
 import { join, extname, dirname } from 'node:path'
 import { homedir, platform, tmpdir } from 'node:os'
@@ -1722,7 +1722,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       return true
     }
 
-    const { botToken, appToken, channelId, extra, allowFrom } = JSON.parse(body.toString()) as { botToken: string; appToken?: string; channelId?: string; extra?: unknown; allowFrom?: unknown }
+    const { botToken, appToken, channelId, extra, allowFrom, preserveAccess } = JSON.parse(body.toString()) as { botToken: string; appToken?: string; channelId?: string; extra?: unknown; allowFrom?: unknown; preserveAccess?: boolean }
     if (!botToken?.trim()) { json(res, { error: 'botToken is required' }, 400); return true }
     // Each token goes into the channel .env as one KEY=value line (ENVTEAMSNAME1028); refused before any network check.
     if (![botToken, appToken ?? '', channelId ?? ''].every((v) => typeof v === 'string' && isSingleLineEnvValue(v.trim()))) {
@@ -1799,6 +1799,13 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // sub-agents under agents/<name>/.claude/channels/<provider>.
     const stateDir = isMain ? channelStateDir(provider) : channelStateDir(provider, agentDir(name))
     mkdirSync(stateDir, { recursive: true })
+    const accessPath = join(stateDir, 'access.json')
+    let preservedAccess: Record<string, unknown> | null = null
+    if (preserveAccess === true && !accessAllowFrom && existsSync(accessPath)) {
+      const existing = readChannelAccessForWrite(res, accessPath)
+      if (!existing) return true
+      preservedAccess = existing
+    }
     const tokenKey = provider === 'slack' ? 'SLACK_BOT_TOKEN'
       : provider === 'discord' ? 'DISCORD_BOT_TOKEN'
       : 'TELEGRAM_BOT_TOKEN'
@@ -1810,12 +1817,14 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       envContent += `DISCORD_CHANNEL_ID=${channelId.trim()}\n`
     }
     atomicWriteFileSync(join(stateDir, '.env'), envContent, { mode: 0o600 })
-    atomicWriteFileSync(join(stateDir, 'access.json'), JSON.stringify({
-      dmPolicy: accessAllowFrom ? 'allowlist' : 'pairing',
-      allowFrom: accessAllowFrom ?? [],
-      groups: {},
-      pending: {},
-    }, null, 2))
+    if (!preservedAccess) {
+      atomicWriteFileSync(accessPath, JSON.stringify({
+        dmPolicy: accessAllowFrom ? 'allowlist' : 'pairing',
+        allowFrom: accessAllowFrom ?? [],
+        groups: {},
+        pending: {},
+      }, null, 2))
+    }
 
     // Main agent doesn't have an agent-config.json or enabled-plugins entry
     // (the channels session reuses the system claude install), so skip the
@@ -1825,6 +1834,13 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     let wasRunning = false
     let restartError: string | undefined
     if (isMain) {
+      if (provider === 'telegram') {
+        const envUpdates: Record<string, string> = { TELEGRAM_BOT_TOKEN: botToken.trim() }
+        if (accessAllowFrom && accessAllowFrom.length > 0) {
+          envUpdates.ALLOWED_CHAT_ID = accessAllowFrom[0]
+        }
+        updateEnvFile(envUpdates)
+      }
       const outcome = mainChannelsRestartOutcome(hardRestartMarveenChannels())
       restarted = outcome.restarted
       restartError = outcome.restartError
@@ -2317,6 +2333,67 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       json(res, { users, groups })
     } catch {
       json(res, { users: [], groups: [] })
+    }
+    return true
+  }
+
+  // POST /api/agents/:name/channels/:provider/allowed -- add user/chat/group ID manually
+  if (allowedListMatch && method === 'POST') {
+    const [name, provider] = allowedListMatch
+    if (name !== MAIN_AGENT_ID && !existsSync(agentDir(name))) {
+      json(res, { error: 'Agent not found' }, 404)
+      return true
+    }
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Adding an allowed user or group needs the dashboard login (an owner session).')
+      return true
+    }
+    const body = await readBody(req)
+    let rawId = ''
+    let kind: 'user' | 'group' = 'user'
+    try {
+      const parsed = JSON.parse(body.toString()) as { id?: unknown; kind?: unknown }
+      rawId = typeof parsed.id === 'string' ? parsed.id.trim() : ''
+      if (parsed.kind === 'group') kind = 'group'
+    } catch {
+      json(res, { error: 'Invalid JSON body' }, 400)
+      return true
+    }
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(rawId)) {
+      json(res, { error: 'Valid id is required (letters, digits, _ or -)' }, 400)
+      return true
+    }
+    const chDir = name === MAIN_AGENT_ID
+      ? channelStateDir(provider)
+      : channelStateDir(provider, agentDir(name))
+    mkdirSync(chDir, { recursive: true })
+    const accessPath = join(chDir, 'access.json')
+    const access = readChannelAccessForWrite(res, accessPath)
+    if (!access) return true
+    try {
+      if (kind === 'group') {
+        if (!access.groups || typeof access.groups !== 'object') access.groups = {}
+        if (!access.groups[rawId]) {
+          access.groups[rawId] = { requireMention: false, allowFrom: [] }
+        }
+      } else {
+        if (!Array.isArray(access.allowFrom)) access.allowFrom = []
+        if (!access.allowFrom.includes(rawId)) access.allowFrom.push(rawId)
+        access.dmPolicy = 'allowlist'
+      }
+      atomicWriteFileSync(accessPath, JSON.stringify(access, null, 2))
+      if (name === MAIN_AGENT_ID && provider === 'telegram' && kind === 'user') {
+        const currentEnv = readFileOr(join(PROJECT_ROOT, '.env'), '')
+        const hasAllowedChat = /^ALLOWED_CHAT_ID=\S+/m.test(currentEnv)
+        if (!hasAllowedChat || access.allowFrom.length === 1) {
+          updateEnvFile({ ALLOWED_CHAT_ID: rawId })
+        }
+      }
+      logger.info({ name, provider, kind, id: rawId }, 'Channel allowlist entry added')
+      json(res, { ok: true, kind, id: rawId })
+    } catch (err) {
+      logger.error({ err }, 'Failed to add allowlist entry')
+      json(res, { error: 'Failed to add allowlist entry' }, 500)
     }
     return true
   }

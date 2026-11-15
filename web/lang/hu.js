@@ -1175,6 +1175,17 @@ window._i18n.hu = {
   'channel.btn.invite_new':       'Új meghívó link',
   'channel.toast.approve_error':  'Jóváhagyási hiba',
   'channel.toast.remove_error':   'Eltávolítási hiba',
+  'channel.telegram_chat_id_label': 'Engedélyezett Telegram Chat ID(k) (opcionális)',
+  'channel.telegram_chat_id_hint':  'Ha megadod a saját Chat ID-dat (pl. @userinfobot-tól, több esetén vesszővel elválasztva), azonnal engedélyezett lesz párosító kód nélkül.',
+  'channel.btn.update_token':     'Token módosítása',
+  'channel.update_token_label':   'Új Bot Token',
+  'channel.kind.dm_option':       'Privát chat (DM)',
+  'channel.kind.group_option':    'Csoport',
+  'channel.add_allowed_placeholder': 'Chat ID (pl. 123456789 vagy -100...)',
+  'channel.btn.add_chat_id':      'Hozzáadás',
+  'channel.toast.allowed_added':  'Chat ID hozzáadva: {id}',
+  'channel.toast.allowed_add_error': 'Chat ID hozzáadási hiba',
+  'channel.toast.token_updated':  'Bot token frissítve',
 
 
   // --- Migrate ---

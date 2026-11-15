@@ -90,4 +90,8 @@ Both OpenAI Codex (`codex:*`) and Google Antigravity (`agy:*`) can operate not o
 - **Bidirectional Telegram Without Claude `--channels`:**
   - **Inbound (`marveen-channel-coordinator`):** `decideHasPluginAlive()` detects when `codex` or `agy` leads the main tmux pane and activates coordinator backfill polling so incoming Telegram messages arrive as `[CHANNEL-INBOUND]` prompts.
   - **Outbound (`scripts/channel-reply-mcp.mjs` → `telegram_reply`):** `syncCliMcpConfig()` automatically registers the zero-secret `marveen_telegram` stdio MCP server in `~/.codex/config.toml` and `~/.gemini/antigravity/mcp_config.json` (reading `TELEGRAM_BOT_TOKEN` internally inside Node from `.env`/state dirs without exposing secrets in configs or argv).
-- **Claude-Free Installers (`install-macos.sh`, `install-linux.sh`):** Interactive selection (or `MARVEEN_ORCHESTRATOR=codex|agy`) allows installing Marveen with Codex or Antigravity as the primary CLI while skipping Claude Code install and OAuth requirements.
+- **Claude-Free Installers (`install-macos.sh`, `install-linux.sh`):**
+  - Automatically probes installed CLIs (`claude`, `codex`, `agy`), discovers available models for the chosen CLI (`models_cache*.json`, `agy models`, etc.), and lets you pick both the orchestrator CLI and exact `MAIN_AGENT_MODEL` during setup (or preseed via `MARVEEN_ORCHESTRATOR` / `MARVEEN_MAIN_MODEL`).
+  - Supports configuring both the **Telegram Bot Token** (`MARVEEN_TELEGRAM_BOT_TOKEN`) and optional **Allowed Chat ID** (`MARVEEN_ALLOWED_CHAT_ID`) right inside the installer, pre-seeding `.env` and `allowlist` mode immediately.
+- **Full Dashboard UI Parity (`Agents → Marveen` & every sub-agent `Channel` tab):**
+  - Set Telegram Bot Token, initial allowed Chat ID(s), manually add DM/group Chat IDs (`POST /api/agents/:name/channels/:provider/allowed`), and rotate tokens without losing existing allowed chats — identically for both the main orchestrator and every sub-agent.

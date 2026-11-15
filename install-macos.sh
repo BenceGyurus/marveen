@@ -633,7 +633,131 @@ _install_bun() {
 _bun_present() { [ -x "$BUN_INSTALL/bin/bun" ] && "$BUN_INSTALL/bin/bun" --version >/dev/null 2>&1; }
 BUN_PIN="1.4.4"
 
-# Fo orchestrator CLI valasztas (Claude / Codex / Antigravity)
+# Fo orchestrator CLI valasztas (Claude / Codex / Antigravity) -- auto-detektalassal es model-valasztassal
+_detect_cli_status() {
+  local cli="$1"
+  case "$cli" in
+    claude)
+      if command -v claude &>/dev/null || [ -x "$HOME/.local/bin/claude" ]; then return 0; fi
+      return 1
+      ;;
+    codex)
+      if command -v codex &>/dev/null || [ -x "/Applications/ChatGPT.app/Contents/Resources/codex" ] || [ -x "$HOME/.npm-global/bin/codex" ]; then return 0; fi
+      return 1
+      ;;
+    agy)
+      if command -v agy &>/dev/null || [ -x "$HOME/.antigravity/antigravity/bin/agy" ]; then return 0; fi
+      return 1
+      ;;
+  esac
+  return 1
+}
+
+_discover_models_for_cli() {
+  local cli="$1"
+  python3 - "$cli" <<'PYEOF' 2>/dev/null || true
+import glob, json, os, re, shutil, subprocess, sys
+
+cli = sys.argv[1] if len(sys.argv) > 1 else 'claude'
+home = os.path.expanduser('~')
+models = []
+seen = set()
+
+def add_model(raw, prefix):
+    m = (raw or '').strip()
+    if not m:
+        return
+    low = m.lower()
+    for p in ('claude:', 'codex:', 'openai:', 'agy:', 'antigravity:'):
+        if low.startswith(p):
+            m = m[len(p):].strip()
+            break
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{1,100}', m):
+        return
+    full = f'{prefix}:{m}' if prefix != 'claude' else m
+    if full not in seen:
+        seen.add(full)
+        models.append(full)
+
+if cli == 'codex':
+    codex_home = os.environ.get('CODEX_HOME') or os.path.join(home, '.codex')
+    cfg = os.path.join(codex_home, 'config.toml')
+    if os.path.isfile(cfg):
+        try:
+            with open(cfg, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    m = re.match(r'^\s*model\s*=\s*["\']([^"\']+)["\']', line)
+                    if m:
+                        add_model(m.group(1), 'codex')
+        except Exception:
+            pass
+    for path in sorted(glob.glob(os.path.join(codex_home, 'models_cache*.json'))):
+        try:
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                data = json.load(f)
+            arr = data.get('models') if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            for item in (arr or []):
+                if isinstance(item, dict):
+                    slug = item.get('slug') or item.get('id') or item.get('model')
+                    if isinstance(slug, str):
+                        add_model(slug, 'codex')
+                elif isinstance(item, str):
+                    add_model(item, 'codex')
+        except Exception:
+            pass
+    for fallback in ('gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.1-codex-max', 'o3', 'o4-mini'):
+        add_model(fallback, 'codex')
+elif cli == 'agy':
+    agy_settings = os.path.join(home, '.gemini', 'antigravity-cli', 'settings.json')
+    if os.path.isfile(agy_settings):
+        try:
+            with open(agy_settings, 'r', encoding='utf-8', errors='ignore') as f:
+                s = json.load(f)
+            if isinstance(s.get('model'), str):
+                add_model(s['model'], 'agy')
+        except Exception:
+            pass
+    agy_bin = shutil.which('agy') or (os.path.join(home, '.antigravity', 'antigravity', 'bin', 'agy') if os.path.isfile(os.path.join(home, '.antigravity', 'antigravity', 'bin', 'agy')) else None)
+    if agy_bin:
+        try:
+            out = subprocess.check_output([agy_bin, 'models'], stderr=subprocess.DEVNULL, timeout=5, text=True)
+            for line in out.splitlines():
+                line = line.strip()
+                if not line or line.lower().startswith(('available', 'model', '---', 'name')):
+                    continue
+                tok = re.split(r'\s+', line)[0].strip('*-•:')
+                if tok:
+                    add_model(tok, 'agy')
+        except Exception:
+            pass
+    for fallback in ('gemini-3-pro-high', 'gemini-3-pro-low', 'gemini-3-flash', 'claude-opus-4-6-thinking', 'claude-sonnet-4-6', 'gpt-oss-120b-medium'):
+        add_model(fallback, 'agy')
+else:
+    for fallback in ('claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'):
+        add_model(fallback, 'claude')
+
+for m in models:
+    print(m)
+PYEOF
+}
+
+_has_claude=0; _detect_cli_status claude && _has_claude=1
+_has_codex=0; _detect_cli_status codex && _has_codex=1
+_has_agy=0; _detect_cli_status agy && _has_agy=1
+
+echo ""
+echo -e "  ${BOLD}Eszlelt AI agent CLI-k ezen a gepen:${NC}"
+[ "$_has_claude" = 1 ] && echo -e "    ${GREEN}✓${NC} Claude Code (claude)" || echo -e "    ${DIM}○${NC} Claude Code (claude) -- nincs telepitve"
+[ "$_has_codex" = 1 ]  && echo -e "    ${GREEN}✓${NC} OpenAI Codex CLI (codex)" || echo -e "    ${DIM}○${NC} OpenAI Codex CLI (codex) -- nincs telepitve"
+[ "$_has_agy" = 1 ]    && echo -e "    ${GREEN}✓${NC} Google Antigravity CLI (agy)" || echo -e "    ${DIM}○${NC} Google Antigravity CLI (agy) -- nincs telepitve"
+
+_default_orch_num=1
+if [ "$_has_claude" = 0 ]; then
+  if [ "$_has_codex" = 1 ]; then _default_orch_num=2
+  elif [ "$_has_agy" = 1 ]; then _default_orch_num=3
+  fi
+fi
+
 ORCH_CLI="${MARVEEN_ORCHESTRATOR:-}"
 ORCH_DEFAULT_MODEL="${MARVEEN_MAIN_MODEL:-}"
 if [ -z "$ORCH_CLI" ] && [ -f "$INSTALL_DIR/.env" ]; then
@@ -646,11 +770,11 @@ fi
 if [ -z "$ORCH_CLI" ] && [ -t 0 ]; then
   echo ""
   echo -e "  ${BOLD}Melyik AI CLI legyen a fo orchestrator (Marveen)?${NC}"
-  echo -e "    ${BOLD}1)${NC} Claude Code (alapertelmezett)"
-  echo -e "    ${BOLD}2)${NC} OpenAI Codex CLI (codex — Claude Code nelkul is mukodik)"
-  echo -e "    ${BOLD}3)${NC} Google Antigravity CLI (agy — Claude Code nelkul is mukodik)"
-  read -rp "  Valasztas [1]: " _orch_choice
-  case "${_orch_choice:-1}" in
+  echo -e "    ${BOLD}1)${NC} Claude Code $([ "$_has_claude" = 1 ] && echo '[telepitve]' || echo '[telepitendo ha ezt valasztod]')"
+  echo -e "    ${BOLD}2)${NC} OpenAI Codex CLI (codex) $([ "$_has_codex" = 1 ] && echo '[telepitve]' || echo '[automatikusan telepiti]')"
+  echo -e "    ${BOLD}3)${NC} Google Antigravity CLI (agy) $([ "$_has_agy" = 1 ] && echo '[telepitve]' || echo '[kulon telepitendo]')"
+  read -rp "  Valasztas [${_default_orch_num}]: " _orch_choice
+  case "${_orch_choice:-$_default_orch_num}" in
     2|codex|CODEX) ORCH_CLI="codex" ;;
     3|agy|AGY|antigravity) ORCH_CLI="agy" ;;
     *) ORCH_CLI="claude" ;;
@@ -659,7 +783,6 @@ fi
 ORCH_CLI="${ORCH_CLI:-claude}"
 case "$ORCH_CLI" in
   codex)
-    ORCH_DEFAULT_MODEL="${ORCH_DEFAULT_MODEL:-codex:gpt-5.4}"
     if [ ! -x "/Applications/ChatGPT.app/Contents/Resources/codex" ] && ! command -v codex &>/dev/null; then
       echo -e "  OpenAI Codex CLI telepitese (@openai/codex)..."
       ensure_global_npm_writable >/dev/null 2>&1 || true
@@ -670,14 +793,10 @@ case "$ORCH_CLI" in
       fi
       hash -r
     fi
-    echo -e "  ${GREEN}✓${NC} OpenAI Codex CLI orchestrator ($ORCH_DEFAULT_MODEL)"
     ;;
   agy|antigravity)
     ORCH_CLI="agy"
-    ORCH_DEFAULT_MODEL="${ORCH_DEFAULT_MODEL:-agy:gemini-3-pro-high}"
-    if [ -x "$HOME/.antigravity/antigravity/bin/agy" ] || command -v agy &>/dev/null; then
-      echo -e "  ${GREEN}✓${NC} Google Antigravity CLI (agy) orchestrator ($ORCH_DEFAULT_MODEL)"
-    else
+    if [ ! -x "$HOME/.antigravity/antigravity/bin/agy" ] && ! command -v agy &>/dev/null; then
       warn "Az 'agy' CLI nincs a PATH-on (~/.antigravity/antigravity/bin/agy). Add hozza az Antigravity CLI-t."
     fi
     ;;
@@ -685,6 +804,48 @@ case "$ORCH_CLI" in
     ORCH_CLI="claude"
     ;;
 esac
+
+if [ -z "$ORCH_DEFAULT_MODEL" ]; then
+  _discovered_models=()
+  while IFS= read -r _dm_line; do
+    [ -n "$_dm_line" ] && _discovered_models+=("$_dm_line")
+  done < <(_discover_models_for_cli "$ORCH_CLI")
+  if [ "${#_discovered_models[@]}" -eq 0 ]; then
+    case "$ORCH_CLI" in
+      codex) _discovered_models=("codex:gpt-5.4") ;;
+      agy)   _discovered_models=("agy:gemini-3-pro-high") ;;
+      *)     _discovered_models=("claude-sonnet-4-6" "claude-opus-4-6") ;;
+    esac
+  fi
+  if [ -t 0 ]; then
+    echo ""
+    echo -e "  ${BOLD}Elerheto modellek (${ORCH_CLI} orchestratorhoz):${NC}"
+    _mi=1
+    for _m in "${_discovered_models[@]}"; do
+      if [ "$_mi" = 1 ]; then
+        echo -e "    ${BOLD}${_mi})${NC} $_m (alapertelmezett)"
+      else
+        echo -e "    ${BOLD}${_mi})${NC} $_m"
+      fi
+      _mi=$((_mi + 1))
+    done
+    read -rp "  Valassz model sorszamot vagy irj be sajat model ID-t [1]: " _model_pick
+    if [ -z "$_model_pick" ]; then
+      ORCH_DEFAULT_MODEL="${_discovered_models[0]}"
+    elif printf '%s' "$_model_pick" | grep -Eq '^[0-9]+$' && [ "$_model_pick" -ge 1 ] && [ "$_model_pick" -le "${#_discovered_models[@]}" ]; then
+      ORCH_DEFAULT_MODEL="${_discovered_models[$((_model_pick - 1))]}"
+    else
+      if [ "$ORCH_CLI" != "claude" ] && ! printf '%s' "$_model_pick" | grep -Eq '^(codex|openai|agy|antigravity|claude):'; then
+        ORCH_DEFAULT_MODEL="${ORCH_CLI}:${_model_pick}"
+      else
+        ORCH_DEFAULT_MODEL="$_model_pick"
+      fi
+    fi
+  else
+    ORCH_DEFAULT_MODEL="${_discovered_models[0]}"
+  fi
+fi
+echo -e "  ${GREEN}✓${NC} Fo orchestrator: $ORCH_CLI ($ORCH_DEFAULT_MODEL)"
 
 # Check Claude Code CLI
 echo ""
@@ -930,7 +1091,7 @@ probe_telegram_token() {
   return 0
 }
 
-BOT_TOKEN=""
+BOT_TOKEN="${MARVEEN_TELEGRAM_BOT_TOKEN:-}"
 SLACK_BOT_TOKEN=""
 SLACK_APP_TOKEN=""
 DISCORD_BOT_TOKEN=""
@@ -938,15 +1099,35 @@ DISCORD_CHANNEL_ID=""
 OPERATOR_DISCORD_USER_ID=""
 
 if [ "$CHANNEL_PROVIDER" = "telegram" ]; then
-  echo ""
-  echo -e "${DIM}  Az AI asszisztensed Telegramon kommunikal veled.${NC}"
-  echo -e "${DIM}  1. Nyisd meg a @BotFather-t a Telegramban${NC}"
-  echo -e "${DIM}  2. Ird be: /newbot${NC}"
-  echo -e "${DIM}  3. Adj nevet a botodnak${NC}"
-  echo -e "${DIM}  4. Masold ide a kapott tokent:${NC}"
-  echo ""
-  read -rp "$(_t prompt_telegram_token)" BOT_TOKEN
+  if [ -z "$BOT_TOKEN" ]; then
+    echo ""
+    echo -e "${DIM}  Az AI asszisztensed Telegramon kommunikal veled.${NC}"
+    echo -e "${DIM}  1. Nyisd meg a @BotFather-t a Telegramban${NC}"
+    echo -e "${DIM}  2. Ird be: /newbot${NC}"
+    echo -e "${DIM}  3. Adj nevet a botodnak${NC}"
+    echo -e "${DIM}  4. Masold ide a kapott tokent:${NC}"
+    echo ""
+    read -rp "$(_t prompt_telegram_token)" BOT_TOKEN
+  fi
   probe_telegram_token "$BOT_TOKEN"
+  if [ -n "$BOT_TOKEN" ]; then
+    _input_chat_id="${MARVEEN_ALLOWED_CHAT_ID:-}"
+    if [ -z "$_input_chat_id" ] && [ -t 0 ]; then
+      echo ""
+      echo -e "${DIM}  Opcionalis: add meg a sajat Telegram Chat ID-dat (pl. @userinfobot-tol),${NC}"
+      echo -e "${DIM}  hogy azonnal engedelyezve legyen parosito kod nelkul (Enter = kesobbi parositas).${NC}"
+      read -rp "  Telegram Chat ID (opcionalis): " _input_chat_id
+    fi
+    _input_chat_id="$(printf '%s' "$_input_chat_id" | tr -d '[:space:]')"
+    if [ -n "$_input_chat_id" ]; then
+      if printf '%s' "$_input_chat_id" | grep -Eq '^[A-Za-z0-9_-]{1,64}$'; then
+        CHAT_ID="$_input_chat_id"
+        ok "Telegram Chat ID beallitva (allowlist): $CHAT_ID"
+      else
+        warn "Ervenytelen Chat ID formatum: $_input_chat_id (kihagyva, kesobb a UI-n hozzaadhato)"
+      fi
+    fi
+  fi
 elif [ "$CHANNEL_PROVIDER" = "discord" ]; then
   echo ""
   echo -e "${DIM}  Az AI asszisztensed Discordon kommunikal veled.${NC}"
@@ -1551,7 +1732,17 @@ CHANNEL_DIR="$HOME/.claude/channels/$CHANNEL_PROVIDER"
 if [ "$CHANNEL_PROVIDER" = "telegram" ] && [ -n "$BOT_TOKEN" ]; then
   (umask 077 && echo "TELEGRAM_BOT_TOKEN=$BOT_TOKEN" > "$CHANNEL_DIR/.env")
   chmod 600 "$CHANNEL_DIR/.env"
-  cat > "$CHANNEL_DIR/access.json" << ACCESSEOF
+  if [ "${CHAT_ID:-0}" != "0" ] && [ -n "${CHAT_ID:-}" ]; then
+    cat > "$CHANNEL_DIR/access.json" << ACCESSEOF
+{
+  "dmPolicy": "allowlist",
+  "allowFrom": ["${CHAT_ID}"],
+  "groups": {},
+  "pending": {}
+}
+ACCESSEOF
+  else
+    cat > "$CHANNEL_DIR/access.json" << ACCESSEOF
 {
   "dmPolicy": "pairing",
   "allowFrom": [],
@@ -1559,6 +1750,12 @@ if [ "$CHANNEL_PROVIDER" = "telegram" ] && [ -n "$BOT_TOKEN" ]; then
   "pending": {}
 }
 ACCESSEOF
+  fi
+  if [ -d "$INSTALL_DIR/.claude/channels/$CHANNEL_PROVIDER" ]; then
+    cp -f "$CHANNEL_DIR/.env" "$INSTALL_DIR/.claude/channels/$CHANNEL_PROVIDER/.env" 2>/dev/null || true
+    chmod 600 "$INSTALL_DIR/.claude/channels/$CHANNEL_PROVIDER/.env" 2>/dev/null || true
+    cp -f "$CHANNEL_DIR/access.json" "$INSTALL_DIR/.claude/channels/$CHANNEL_PROVIDER/access.json" 2>/dev/null || true
+  fi
   echo -e "  ${GREEN}✓${NC} $(_t macos.tg_channel_configured)"
 elif [ "$CHANNEL_PROVIDER" = "slack" ] && [ -n "$SLACK_BOT_TOKEN" ]; then
   (umask 077 && cat > "$CHANNEL_DIR/.env" << SLACKENVEOF
@@ -2251,7 +2448,10 @@ _pairing_access_file() {
   if [ -f "$scoped" ]; then echo "$scoped"; else echo "$CHANNEL_DIR/access.json"; fi
 }
 
-if [ "$CHANNEL_PROVIDER" = "telegram" ] && [ -n "$BOT_TOKEN" ]; then
+if [ "$CHANNEL_PROVIDER" = "telegram" ] && [ -n "$BOT_TOKEN" ] && [ "${CHAT_ID:-0}" != "0" ]; then
+  echo ""
+  ok "Telegram Chat ID ($CHAT_ID) mar engedelyezve (allowlist) -- kezi parositas nem szukseges."
+elif [ "$CHANNEL_PROVIDER" = "telegram" ] && [ -n "$BOT_TOKEN" ]; then
   echo ""
   echo -e "${BOLD}$(_t macos.tg_pairing_title)${NC}"
   echo -e "${DIM}$(_t macos.tg_pairing_hint)${NC}"
@@ -2307,7 +2507,11 @@ with open('$ACCESS_FILE', 'w') as f:
     fi
   else
     echo -e "  ${DIM}$(_t macos.pairing_later)${NC}"
-    echo -e "  ${DIM}Futtasd: claude, majd /telegram:access pair AKOD${NC}"
+    if [ "${ORCH_CLI:-claude}" = "claude" ]; then
+      echo -e "  ${DIM}Futtasd: claude, majd /telegram:access pair AKOD${NC}"
+    else
+      echo -e "  ${DIM}Add meg a Chat ID-dat a Dashboardon: Ugynokok -> Marveen -> Csatorna${NC}"
+    fi
   fi
 fi
 

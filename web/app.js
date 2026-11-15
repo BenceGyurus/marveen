@@ -4396,9 +4396,13 @@ async function openMarveenDetail() {
     const claudeRes = await fetch('/api/marveen')
     if (claudeRes.ok) {
       mFull = await claudeRes.json()
+      window._marveen = { ...(window._marveen || {}), ...mFull }
       document.getElementById('editClaudeMd').value = mFull.claudeMd || ''
       document.getElementById('editSoulMd').value = mFull.soulMd || ''
       document.getElementById('editMcpJson').value = mFull.mcpJson || ''
+      document.getElementById('agentDetailChStatus').innerHTML = mFull.mainChannelUnconfigured
+        ? `<span class="tg-status"><span class="tg-dot"></span>${t('agents.channel.not_configured')}</span>`
+        : `<span class="tg-status"><span class="tg-dot connected"></span>${t('agents.channel.connected')}</span>`
     }
   } catch {}
   applyMarveenReadonlyMode(true)
@@ -6808,10 +6812,14 @@ function updateProviderUI() {
   const howto = document.getElementById('chHowtoContent')
   const pairingInfo = document.getElementById('chPairingInfo')
   const discordChannelGroup = document.getElementById('chDiscordChannelIdGroup')
+  const tgAllowFromGroup = document.getElementById('chTelegramAllowFromGroup')
+  const editTokenToggleBtn = document.getElementById('chEditTokenToggleBtn')
   const tokenGroup = document.getElementById('chTokenGroup')
   // Teams config is terminal-driven (creds land in the .env via setup-azure-bot.sh),
   // not a dashboard token paste -- default the token field visible, hide it for teams.
   if (tokenGroup) tokenGroup.hidden = false
+  if (tgAllowFromGroup) tgAllowFromGroup.hidden = !isTg
+  if (editTokenToggleBtn) editTokenToggleBtn.hidden = (currentChannelProvider === 'teams')
 
   if (isTg) {
     if (title) title.textContent = t('channel.setup.tg_title')
@@ -6871,6 +6879,14 @@ function updateChannelTab(agent) {
     document.getElementById('chRunningNotice').hidden = !running
   }
   document.getElementById('chTokenInput').value = ''
+  const tgAllowInput = document.getElementById('chTelegramAllowFromInput')
+  if (tgAllowInput) tgAllowInput.value = ''
+  const updTokenInput = document.getElementById('chUpdateTokenInput')
+  if (updTokenInput) updTokenInput.value = ''
+  const editTokenRow = document.getElementById('chEditTokenRow')
+  if (editTokenRow) editTokenRow.hidden = true
+  const addAllowedInput = document.getElementById('chAddAllowedInput')
+  if (addAllowedInput) addAllowedInput.value = ''
   const slackInput = document.getElementById('chSlackAppToken')
   if (slackInput) slackInput.value = ''
   const discordChanInput = document.getElementById('chDiscordChannelId')
@@ -6925,7 +6941,13 @@ document.getElementById('chConnectBtn').addEventListener('click', async () => {
   }
 
   const payload = { botToken: token }
-  if (currentChannelProvider === 'slack') {
+  if (currentChannelProvider === 'telegram') {
+    const rawAllow = document.getElementById('chTelegramAllowFromInput')?.value.trim() || ''
+    if (rawAllow) {
+      const ids = rawAllow.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean)
+      if (ids.length > 0) payload.allowFrom = ids
+    }
+  } else if (currentChannelProvider === 'slack') {
     const appToken = document.getElementById('chSlackAppToken').value.trim()
     if (appToken) payload.appToken = appToken
   } else if (currentChannelProvider === 'discord') {
@@ -6962,8 +6984,13 @@ document.getElementById('chConnectBtn').addEventListener('click', async () => {
     else showToast(t('channel.toast.connected', { provider: getProviderLabel() }))
     // Refresh detail
     // CHANNELUNCONF1110: the main agent's detail draws from /api/marveen; fetch it first so the status and the banner follow.
-    if (currentAgent.name === mainAgentId()) await refreshMainChannelUnconfBanner()
-    await openAgentDetail(currentAgent.name)
+    if (currentAgent.name === mainAgentId()) {
+      await refreshMainChannelUnconfBanner()
+      await openMarveenDetail()
+      switchAgentTab('channel')
+    } else {
+      await openAgentDetail(currentAgent.name)
+    }
     loadAgents()
   } catch (err) {
     showToast(`${t('common.error')}: ${err.message}`)
@@ -7188,6 +7215,71 @@ async function removeAllowed(kind, id) {
 }
 
 document.getElementById('chRefreshAllowedBtn').addEventListener('click', refreshAllowedList)
+
+document.getElementById('chEditTokenToggleBtn')?.addEventListener('click', () => {
+  const row = document.getElementById('chEditTokenRow')
+  if (!row) return
+  row.hidden = !row.hidden
+  if (!row.hidden) document.getElementById('chUpdateTokenInput')?.focus()
+})
+
+document.getElementById('chSaveTokenBtn')?.addEventListener('click', async () => {
+  if (!currentAgent) return
+  const input = document.getElementById('chUpdateTokenInput')
+  const token = input?.value.trim() || ''
+  if (!token) { input?.focus(); return }
+  const btn = document.getElementById('chSaveTokenBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch(`${channelApiBase()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ botToken: token, preserveAccess: true }),
+    })
+    const result = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(result.error || t('channel.toast.connect_error'))
+    if (result.restartError) showToast(t('agents.channel.saved_restart_failed', { provider: getProviderLabel(), cmd: result.restartCommand || '' }), 12000)
+    else showToast(t('channel.toast.token_updated'))
+    if (currentAgent.name === mainAgentId()) {
+      await refreshMainChannelUnconfBanner()
+      await openMarveenDetail()
+      switchAgentTab('channel')
+    } else {
+      await openAgentDetail(currentAgent.name)
+    }
+    loadAgents()
+  } catch (err) {
+    showToast(`${t('common.error')}: ${err.message}`)
+  } finally {
+    btn.disabled = false
+  }
+})
+
+document.getElementById('chAddAllowedBtn')?.addEventListener('click', async () => {
+  if (!currentAgent) return
+  const input = document.getElementById('chAddAllowedInput')
+  const kind = document.getElementById('chAddAllowedKind')?.value === 'group' ? 'group' : 'user'
+  const id = input?.value.trim() || ''
+  if (!id) { input?.focus(); return }
+  const btn = document.getElementById('chAddAllowedBtn')
+  btn.disabled = true
+  try {
+    const res = await fetch(`${channelApiBase()}/allowed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, kind }),
+    })
+    const result = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(result.error || t('channel.toast.allowed_add_error'))
+    if (input) input.value = ''
+    showToast(t('channel.toast.allowed_added', { id: result.id || id }))
+    refreshAllowedList()
+  } catch (err) {
+    showToast(`${t('common.error')}: ${err.message}`)
+  } finally {
+    btn.disabled = false
+  }
+})
 
 async function refreshInvites() {
   if (!currentAgent) return
@@ -7433,8 +7525,13 @@ document.getElementById('chDisconnectBtn').addEventListener('click', async () =>
     if (!reply.ok) { showToast(t('common.not_done', { msg: refusalReason(res, reply.body) })); return }
     showToast(t('channel.toast.disconnected', { provider: provLabel }))
     // CHANNELUNCONF1110: the main agent's detail draws from /api/marveen; fetch it first so the status and the banner follow.
-    if (currentAgent.name === mainAgentId()) await refreshMainChannelUnconfBanner()
-    await openAgentDetail(currentAgent.name)
+    if (currentAgent.name === mainAgentId()) {
+      await refreshMainChannelUnconfBanner()
+      await openMarveenDetail()
+      switchAgentTab('channel')
+    } else {
+      await openAgentDetail(currentAgent.name)
+    }
     loadAgents()
   } catch {
     showToast(t('channel.toast.disconnect_error'))

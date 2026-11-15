@@ -3098,6 +3098,11 @@
               <label for="chTokenInput" id="chTokenLabel">Bot API Token</label>
               <input type="text" id="chTokenInput" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
             </div>
+            <div class="form-group" id="chTelegramAllowFromGroup">
+              <label for="chTelegramAllowFromInput" data-i18n="channel.telegram_chat_id_label">Engedélyezett Telegram Chat ID(k) (opcionális)</label>
+              <input type="text" id="chTelegramAllowFromInput" placeholder="123456789">
+              <small style="display:block;margin-top:4px;color:var(--text-muted);font-size:12px" data-i18n="channel.telegram_chat_id_hint">Ha megadod a saját Chat ID-dat (pl. @userinfobot-tól, több esetén vesszővel elválasztva), azonnal engedélyezett lesz párosító kód nélkül.</small>
+            </div>
             <div id="chSlackManifestBtnGroup" hidden style="margin-bottom:12px">
               <button class="btn btn-secondary" id="chSlackManifestBtn" data-i18n="channel.btn.slack_manifest" style="font-size:13px;padding:6px 14px">
                 Slack App létrehozása (manifest)
@@ -3126,6 +3131,14 @@
                 <span class="tg-dot connected"></span>
                 <span id="chBotUsername">@bot</span>
                 <span class="badge badge-active" data-i18n="channel.token_badge">Token beállítva</span>
+                <button type="button" class="btn-secondary btn-compact" id="chEditTokenToggleBtn" style="margin-left:auto;font-size:12px;" data-i18n="channel.btn.update_token">Token módosítása</button>
+              </div>
+              <div id="chEditTokenRow" hidden style="margin:8px 0 10px 0; padding:10px; border:1px solid var(--border); border-radius:8px;">
+                <label for="chUpdateTokenInput" style="display:block; font-size:12px; font-weight:600; margin-bottom:6px;" data-i18n="channel.update_token_label">Új Bot Token</label>
+                <div style="display:flex; gap:8px; align-items:center;">
+                  <input type="text" id="chUpdateTokenInput" placeholder="123456:ABC-DEF..." style="flex:1;">
+                  <button type="button" class="btn-primary btn-compact" id="chSaveTokenBtn" data-i18n="common.btn.save">Mentés</button>
+                </div>
               </div>
               <div class="tg-notice" id="chRunNotice">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -3147,6 +3160,14 @@
                 <div class="tg-allowed-empty" data-i18n="agents.channel.tg_no_chats">Még nincs bekötött chat. Lent add hozzá az elsőt.</div>
               </div>
               <button class="btn-secondary btn-compact" id="chRefreshAllowedBtn" style="margin-top:8px; font-size:12px;" data-i18n="channel.refresh_list_btn">Lista frissítése</button>
+              <div id="chAddAllowedRow" style="display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+                <select id="chAddAllowedKind" style="width:auto; min-width:120px;">
+                  <option value="user" data-i18n="channel.kind.dm_option">Privát chat (DM)</option>
+                  <option value="group" data-i18n="channel.kind.group_option">Csoport</option>
+                </select>
+                <input type="text" id="chAddAllowedInput" data-i18n-placeholder="channel.add_allowed_placeholder" placeholder="Chat ID (pl. 123456789 vagy -100...)" style="flex:1; min-width:160px;">
+                <button type="button" class="btn-primary btn-compact" id="chAddAllowedBtn" data-i18n="channel.btn.add_chat_id">Hozzáadás</button>
+              </div>
             </div>
             <div class="tg-invite-section" id="chInviteSection">
               <h4 data-i18n="agents.channel.invite_title">Meghívó link (egy kattintásos hozzáadás)</h4>

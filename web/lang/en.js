@@ -801,6 +801,17 @@ window._i18n.en = {
   'channel.btn.invite_new':       'New invite link',
   'channel.toast.approve_error':  'Approval error',
   'channel.toast.remove_error':   'Removal error',
+  'channel.telegram_chat_id_label': 'Allowed Telegram Chat ID(s) (optional)',
+  'channel.telegram_chat_id_hint':  'Enter your Chat ID (e.g. from @userinfobot, comma-separated for multiple) to allow immediately without pairing codes.',
+  'channel.btn.update_token':     'Update token',
+  'channel.update_token_label':   'New Bot Token',
+  'channel.kind.dm_option':       'Private chat (DM)',
+  'channel.kind.group_option':    'Group',
+  'channel.add_allowed_placeholder': 'Chat ID (e.g. 123456789 or -100...)',
+  'channel.btn.add_chat_id':      'Add',
+  'channel.toast.allowed_added':  'Chat ID added: {id}',
+  'channel.toast.allowed_add_error': 'Failed to add Chat ID',
+  'channel.toast.token_updated':  'Bot token updated',
 
 
   // --- Migrate ---
