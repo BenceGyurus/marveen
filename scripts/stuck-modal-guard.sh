@@ -290,11 +290,27 @@ run_guard() {
   # session); assigning the binary path to it corrupts server-socket detection.
   local MODE; MODE="$(resolve_mode)"
   [ "$MODE" = off ] && return 0
+
+  # Non-Claude orchestrators (Codex / Antigravity) use different TUI rendering and
+  # must never be classified as stuck or respawned with `claude`.
+  [ -f "$INSTALL_DIR/scripts/lib/main-cli-type.sh" ] && . "$INSTALL_DIR/scripts/lib/main-cli-type.sh"
+  if command -v marveen_main_cli_type >/dev/null 2>&1; then
+    [ "$(marveen_main_cli_type "$INSTALL_DIR")" = "claude" ] || return 0
+  else
+    local _smg_model
+    _smg_model="$(grep -E '^MAIN_AGENT_MODEL=' "$INSTALL_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"'\r " || true)"
+    case "$_smg_model" in
+      codex:*|openai:*|agy:*|antigravity:*|gpt-*|gemini-*|o1-*|o3-*|o4-*|*-low|*-medium|*-high|*-xhigh)
+        return 0
+        ;;
+    esac
+  fi
+
   # NATIVECLAUDEFIRST1011 (#1896): the native launcher first for the claude the
   # respawn runs. An already installed Mac keeps its launchd plist (update.sh
   # does not rewrite a loaded job), whose PATH puts /opt/homebrew/bin first.
-  TMUX_BIN="$(command -v tmux)"
-  CLAUDE="$HOME/.local/bin/claude"; [ -x "$CLAUDE" ] || CLAUDE="$(command -v claude)"
+  TMUX_BIN="$(command -v tmux 2>/dev/null || true)"
+  CLAUDE="$HOME/.local/bin/claude"; [ -x "$CLAUDE" ] || CLAUDE="$(command -v claude)" || CLAUDE=""
   if [ -z "$TMUX_BIN" ]; then log "tmux not on PATH; cannot act"; return 0; fi
 
   # Ensure the state dir exists BEFORE any stamp/lock write. Without it, a cold

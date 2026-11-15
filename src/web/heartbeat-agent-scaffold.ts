@@ -52,6 +52,7 @@ import { resolveDashboardOrigin } from './agent-scaffold.js'
 import { logger } from '../logger.js'
 import { CHANNEL_PLUGIN_IDS } from './plugin-ids.js'
 import { HB_METRICS_BLOCK_MARKER } from './heartbeat-metrics-inject.js'
+import { prepareWorkspaceForCli, resolveConfiguredMainCliType, resolveConfiguredMainModel } from '../cli-detector.js'
 
 const HEARTBEAT_AGENT_NAME = HEARTBEAT_AGENT_ID
 const HEARTBEAT_AGENT_DIR = join(PROJECT_ROOT, 'agents', HEARTBEAT_AGENT_NAME)
@@ -289,7 +290,9 @@ note and stop.
 }
 
 function renderAgentConfigJson(): string {
-  return JSON.stringify(HEARTBEAT_AGENT_CONFIG, null, 2) + '\n'
+  const mainCli = resolveConfiguredMainCliType(PROJECT_ROOT)
+  const model = mainCli === 'claude' ? HEARTBEAT_AGENT_CONFIG.model : resolveConfiguredMainModel(PROJECT_ROOT)
+  return JSON.stringify({ ...HEARTBEAT_AGENT_CONFIG, model }, null, 2) + '\n'
 }
 
 // The project-scope settings must MERGE, never overwrite (HBGATEWIRE826):
@@ -353,6 +356,7 @@ export function ensureHeartbeatAgent(): void {
       const p = join(HEARTBEAT_AGENT_DIR, relPath)
       if (!existsSync(p)) writeFileSync(p, body)
     }
+    prepareWorkspaceForCli(HEARTBEAT_AGENT_DIR, resolveConfiguredMainCliType(PROJECT_ROOT))
     logger.info({ dir: HEARTBEAT_AGENT_DIR }, 'Heartbeat agent scaffold ensured')
   } catch (err) {
     logger.error({ err, dir: HEARTBEAT_AGENT_DIR }, 'Failed to scaffold heartbeat agent')

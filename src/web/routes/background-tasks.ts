@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -6,18 +8,79 @@ import {
   getBackgroundTask, getRunningBackgroundTasks, markOrphanedTasksFailed,
   type BackgroundTask,
 } from '../../db.js'
-import { resolveFromPath } from '../../platform.js'
-import { APP_TZ } from '../../config.js'
+import { resolveFromPath, tryResolveFromPath } from '../../platform.js'
+import { getCliTypeForModel, resolveCliBinary } from '../../cli-detector.js'
+import { APP_TZ, MAIN_AGENT_ID, PROJECT_ROOT, STORE_DIR } from '../../config.js'
 import { logger } from '../../logger.js'
 import { fleetVenvPathPrefix } from '../agent-process.js'
+import { ROOT_SANDBOX_ENV } from '../root-sandbox-env.js'
 import { readBody, json } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 import { exactTmuxTarget } from '../../tmux-target.js'
 
 const execFileAsync = promisify(execFile)
 
-const TMUX = resolveFromPath('tmux')
-const CLAUDE = resolveFromPath('claude')
+function tmuxBin(): string {
+  return resolveFromPath('tmux')
+}
+
+function shSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+function resolveBgAgentModel(agentId: string): string | null {
+  try {
+    const cfgPath = join(PROJECT_ROOT, 'agents', agentId, 'agent-config.json')
+    if (existsSync(cfgPath)) {
+      const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8')) as { model?: unknown }
+      if (typeof cfg.model === 'string' && cfg.model.trim()) return cfg.model.trim()
+    }
+    if (agentId === MAIN_AGENT_ID || agentId === 'marveen') {
+      const envPath = join(STORE_DIR, '..', '.env')
+      if (existsSync(envPath)) {
+        for (const line of readFileSync(envPath, 'utf-8').split('\n')) {
+          const m = /^(?:export\s+)?(MAIN_AGENT_MODEL|MAIN_MODEL)\s*=\s*(.+)$/.exec(line.trim())
+          if (m) {
+            const val = m[2].trim().replace(/^["']|["']$/g, '')
+            if (val) return val
+          }
+        }
+      }
+    }
+  } catch { /* fall through */ }
+  return null
+}
+
+function buildBackgroundTaskExec(agentId: string): string {
+  const model = resolveBgAgentModel(agentId)
+  const cliType = getCliTypeForModel(model)
+  const cleanModel = model ? model.replace(/^(?:claude|codex|openai|agy|antigravity):/i, '') : ''
+
+  if (cliType === 'codex') {
+    const codexBin = resolveCliBinary('codex') ?? 'codex'
+    const modelFlag = cleanModel ? ` -m ${shSingleQuote(cleanModel)}` : ''
+    return `${ROOT_SANDBOX_ENV} && unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${shSingleQuote(codexBin)} exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check${modelFlag} "$BG_PROMPT" 2>&1`
+  }
+  if (cliType === 'agy') {
+    const agyBin = resolveCliBinary('agy') ?? 'agy'
+    const modelFlag = cleanModel ? ` --model ${shSingleQuote(cleanModel)}` : ''
+    return `${ROOT_SANDBOX_ENV} && unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${shSingleQuote(agyBin)} --dangerously-skip-permissions -p "$BG_PROMPT"${modelFlag} 2>&1`
+  }
+
+  const claudeBin = tryResolveFromPath('claude')
+  if (claudeBin) {
+    return `${ROOT_SANDBOX_ENV} && ${shSingleQuote(claudeBin)} -p "$BG_PROMPT" --output-format text 2>&1`
+  }
+  const fallbackAgy = resolveCliBinary('agy')
+  if (fallbackAgy) {
+    return `${ROOT_SANDBOX_ENV} && unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${shSingleQuote(fallbackAgy)} --dangerously-skip-permissions -p "$BG_PROMPT" 2>&1`
+  }
+  const fallbackCodex = resolveCliBinary('codex')
+  if (fallbackCodex) {
+    return `${ROOT_SANDBOX_ENV} && unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${shSingleQuote(fallbackCodex)} exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$BG_PROMPT" 2>&1`
+  }
+  return `${ROOT_SANDBOX_ENV} && claude -p "$BG_PROMPT" --output-format text 2>&1`
+}
 const MAX_CONCURRENT = 3
 const TIMEOUT_MS = 30 * 60 * 1000
 
@@ -32,7 +95,7 @@ function bgSessionName(id: string): string {
 // a non-zero tmux exit (e.g. 1, "no server running") means the session is really gone.
 async function bgSessionState(session: string): Promise<'alive' | 'dead' | 'unknown'> {
   try {
-    const { stdout } = await execFileAsync(TMUX, ['list-sessions', '-F', '#{session_name}'], { timeout: 3000, encoding: 'utf-8' })
+    const { stdout } = await execFileAsync(tmuxBin(), ['list-sessions', '-F', '#{session_name}'], { timeout: 3000, encoding: 'utf-8' })
     return stdout.split('\n').some(l => l.trim() === session) ? 'alive' : 'dead'
   } catch (err) {
     if (typeof (err as { code?: unknown }).code === 'number') return 'dead'
@@ -43,7 +106,7 @@ async function bgSessionState(session: string): Promise<'alive' | 'dead' | 'unkn
 
 async function captureSession(session: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync(TMUX, ['capture-pane', '-t', exactTmuxTarget(session), '-p', '-S', '-500'], { timeout: 5000, encoding: 'utf-8' })
+    const { stdout } = await execFileAsync(tmuxBin(), ['capture-pane', '-t', exactTmuxTarget(session), '-p', '-S', '-500'], { timeout: 5000, encoding: 'utf-8' })
     return stdout
   } catch {
     return null
@@ -52,7 +115,7 @@ async function captureSession(session: string): Promise<string | null> {
 
 async function killSession(session: string): Promise<void> {
   try {
-    await execFileAsync(TMUX, ['kill-session', '-t', exactTmuxTarget(session)], { timeout: 3000 })
+    await execFileAsync(tmuxBin(), ['kill-session', '-t', exactTmuxTarget(session)], { timeout: 3000 })
   } catch { /* already dead */ }
 }
 
@@ -67,12 +130,13 @@ export async function spawnBackgroundTask(agentId: string, prompt: string): Prom
 
   const shellCmd = [
     // FLEETVENV923: the fleet venv's bin/ first, as in every agent launch.
-    `export PATH="${fleetVenvPathPrefix()}/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH"`,
-    `${CLAUDE} -p "$BG_PROMPT" --output-format text 2>&1`,
+    `export PATH="${fleetVenvPathPrefix()}$HOME/.local/bin:/opt/homebrew/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH"`,
+    'export CLAUDE_CODE_DISABLE_AGENT_VIEW=1',
+    buildBackgroundTaskExec(agentId),
   ].join(' && ')
 
   try {
-    await execFileAsync(TMUX, [
+    await execFileAsync(tmuxBin(), [
       'new-session', '-d', '-s', session, '-x', '200', '-y', '50',
       `${shellCmd}; echo '___BG_DONE___'; sleep 5`,
     ], {

@@ -93,10 +93,18 @@ if ! bash scripts/verify-channels-health.sh &>/dev/null; then
   FAIL=1
 fi
 
+MAIN_CLI_TYPE="claude"
+if [ -f "scripts/lib/main-cli-type.sh" ]; then
+  . "scripts/lib/main-cli-type.sh"
+  MAIN_CLI_TYPE="$(marveen_main_cli_type "$(pwd)")"
+fi
+ok "Main orchestrator CLI: $MAIN_CLI_TYPE"
+
 # --- Managed-settings channel org-policy gate ---
 # claude-code >= 2.1.205 silently drops channel-plugin INBOUND notifications on a
 # team/enterprise org unless the system managed-settings has channelsEnabled:true.
 # Diagnostic only (warn, not fail): a personal org ignores the flag.
+if [ "$MAIN_CLI_TYPE" = "claude" ]; then
 echo -e "\n${BOLD}Managed-settings${RESET}"
 case "$(uname -s)" in
   Darwin) MANAGED_FILE="/Library/Application Support/ClaudeCode/managed-settings.json" ;;
@@ -173,6 +181,7 @@ if [ -f "$KA_FILE" ]; then
   fi
 else
   fail "channel-keepalive: file missing"
+fi
 fi
 
 # --- Settings ---

@@ -92,6 +92,28 @@ if [ -f "$INSTALL_DIR/scripts/main-channel-configured.sh" ] && . "$INSTALL_DIR/s
 fi
 unset _vch_provider
 
+[ -f "$INSTALL_DIR/scripts/lib/main-cli-type.sh" ] && . "$INSTALL_DIR/scripts/lib/main-cli-type.sh"
+_VCH_CLI="claude"
+if command -v marveen_main_cli_type >/dev/null 2>&1; then
+  _VCH_CLI="$(marveen_main_cli_type "$INSTALL_DIR")"
+fi
+if [ "$_VCH_CLI" != "claude" ]; then
+  if [ -z "$PANE_PID" ]; then
+    note "(cli:$_VCH_CLI) FAIL: tmux session $SESSION not found"; fail=1
+  elif pgrep -P "$PANE_PID" "$_VCH_CLI" >/dev/null 2>&1 || ps -p "$PANE_PID" -o args= 2>/dev/null | grep -qE "(^|/)${_VCH_CLI}(\\s|$)"; then
+    note "(cli:$_VCH_CLI) OK: orchestrator session $SESSION alive (pane pid=$PANE_PID)"
+  else
+    note "(cli:$_VCH_CLI) FAIL: orchestrator $_VCH_CLI process not running in session $SESSION"; fail=1
+  fi
+  if pgrep -f "channel-coordinator\.js" >/dev/null 2>&1; then
+    note "(coordinator) OK: channel-coordinator polling active"
+  else
+    note "(coordinator) FAIL: channel-coordinator.js not running (needed for $_VCH_CLI Telegram inbound)"; fail=1
+  fi
+  if [ "$fail" -eq 0 ]; then echo "verify-channels-health: HEALTHY"; else echo "verify-channels-health: UNHEALTHY"; fi
+  exit "$fail"
+fi
+
 # (a) bun bridge descendant under the ${MAIN_AGENT_ID}-channels tmux pane
 # Walk the pane shell's own process-tree (up to 4 levels deep) for a
 # "bun server.ts" process.  Every PID checked is a descendant of the

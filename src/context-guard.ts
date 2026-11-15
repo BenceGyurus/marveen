@@ -285,8 +285,11 @@ const ONE_MILLION_FAMILIES = [/fable-\d/, /mythos-\d/, /opus-4-[6-9]/, /opus-[5-
 
 export function contextLimitForModel(model: string | null | undefined): number {
   if (typeof model !== 'string') return 200_000
-  const m = model.toLowerCase()
+  const m = model.toLowerCase().replace(/^(?:claude|codex|agy):/, '')
   if (m.includes('[1m]')) return 1_000_000
+  if (/^(?:google\/)?gemini-/.test(m)) return 1_000_000
+  if (/^(?:openai\/)?gpt-4\.1/.test(m)) return 1_000_000
+  if (/^(?:openai\/)?gpt-5/.test(m)) return 400_000
   // Fable 5.2 (FABLE52SELECTOR1109, measured 2026-11-09): the model has a 1M
   // window (official models overview), but Claude Code 2.1.319, the fleet's
   // CLI, does not know the id yet: `claude -p --model claude-fable-5-2` warns

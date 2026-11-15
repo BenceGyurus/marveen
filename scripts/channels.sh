@@ -83,7 +83,14 @@ if [ -f "$INSTALL_DIR/.env" ]; then
   # writes its model choice there carries a permanent local diff, which blocks
   # the update preflight's clean-tree check and silently reverts to the
   # repository's value on the next update. .env is per-install and gitignored.
-  MAIN_AGENT_MODEL="$(grep -E '^MAIN_AGENT_MODEL=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2-)"
+  MAIN_AGENT_MODEL="$(grep -E '^MAIN_AGENT_MODEL=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")"
+  # Multi-CLI provider API keys & base URLs: forward from .env so systemd/launchd
+  # sessions running Codex / Antigravity / custom endpoints receive their auth.
+  for _env_k in GEMINI_API_KEY GOOGLE_API_KEY GEMINI_API_BASE OPENAI_API_KEY OPENAI_BASE_URL; do
+    _env_v="$(grep -E "^${_env_k}=" "$INSTALL_DIR/.env" | tail -1 | cut -d= -f2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")"
+    [ -n "$_env_v" ] && export "${_env_k}=${_env_v}"
+  done
+  unset _env_k _env_v
   # Claude Code auth: pass API key or OAuth token so the tmux-spawned
   # claude process can authenticate. These are safe to export -- unlike
   # TELEGRAM_BOT_TOKEN they don't cause cross-session conflicts.
@@ -239,7 +246,7 @@ resolve_cli_bin() {
   local _name="$1" _p=""
   _p="$(command -v "$_name" 2>/dev/null || true)"
   if [ -z "$_p" ]; then
-    for _cand in "$HOME/.local/bin/$_name" "/opt/homebrew/bin/$_name" "/usr/local/bin/$_name" \
+    for _cand in "$HOME/.local/bin/$_name" "/opt/homebrew/bin/$_name" "/home/linuxbrew/.linuxbrew/bin/$_name" "/usr/local/bin/$_name" \
       "$([ "$_name" = "codex" ] && printf '/Applications/ChatGPT.app/Contents/Resources/codex')" \
       "$([ "$_name" = "agy" ] && printf "$HOME/.antigravity/antigravity/bin/agy")"; do
       if [ -n "$_cand" ] && [ -x "$_cand" ]; then
@@ -1264,12 +1271,12 @@ if marveen_in_docker; then
     echo "$(date '+%F %T') claude update SKIPPED: Docker mode, the image owns the version" >&2
   fi
 elif ! command -v claude >/dev/null 2>&1; then
-  if [ "$MAIN_CLI_TYPE" = "claude" ]; then
+  if [ "${MAIN_CLI_TYPE:-claude}" = "claude" ]; then
     if ! claude_relink_native; then
       claude_install "binary missing -- self-heal"
     fi
   fi
-elif [ "$MAIN_CLI_TYPE" != "claude" ]; then
+elif [ "${MAIN_CLI_TYPE:-claude}" != "claude" ]; then
   :
 elif claude_is_native; then
   claude_native_behind_npm_note
@@ -1287,13 +1294,13 @@ elif [ "$AVX_LESS" = "0" ] && [ -z "$(find "$CLAUDE_UPDATE_STAMP" -mtime -1 2>/d
   DAILY_CLAUDE_CHECK=1
 fi
 
-CLAUDE="$(command -v claude 2>/dev/null || true)"
+CLAUDE="$(command -v claude)" || true
 CODEX_BIN="$(resolve_cli_bin codex)"
 AGY_BIN="$(resolve_cli_bin agy)"
 TMUX="$(command -v tmux)"
-if [ "$MAIN_CLI_TYPE" = "codex" ]; then
+if [ "${MAIN_CLI_TYPE:-claude}" = "codex" ]; then
   [ -z "$CODEX_BIN" ] && echo "ERROR: codex not found on PATH" >&2 && exit 1
-elif [ "$MAIN_CLI_TYPE" = "agy" ]; then
+elif [ "${MAIN_CLI_TYPE:-claude}" = "agy" ]; then
   [ -z "$AGY_BIN" ] && echo "ERROR: agy not found on PATH" >&2 && exit 1
 else
   [ -z "$CLAUDE" ] && echo "ERROR: claude not found on PATH" >&2 && exit 1
@@ -1339,9 +1346,10 @@ MCP_BATCH_ENV="export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_DIS
 MODEL_FLAG=""
 CODEX_MODEL_FLAG=""
 AGY_MODEL_FLAG=""
-if [ "$MAIN_CLI_TYPE" = "codex" ]; then
+[ -n "$MAIN_MODEL" ] && MODEL_FLAG="--model $(sh_single_quote "$MAIN_MODEL") "
+if [ "${MAIN_CLI_TYPE:-claude}" = "codex" ]; then
   [ -n "$RAW_MAIN_MODEL" ] && CODEX_MODEL_FLAG="-m $(sh_single_quote "$RAW_MAIN_MODEL") "
-elif [ "$MAIN_CLI_TYPE" = "agy" ]; then
+elif [ "${MAIN_CLI_TYPE:-claude}" = "agy" ]; then
   [ -n "$RAW_MAIN_MODEL" ] && AGY_MODEL_FLAG="--model $(sh_single_quote "$RAW_MAIN_MODEL") "
 else
   [ -n "$RAW_MAIN_MODEL" ] && MODEL_FLAG="--model $(sh_single_quote "$RAW_MAIN_MODEL") "
@@ -2026,28 +2034,49 @@ esac
 # the server's global environment, so every sub-agent session inherited the
 # MAIN session's channel state dir. The -g -u after the launch cleans a server
 # polluted earlier.
-# Headroom context optimizer wrapper (`headroom wrap claude --` / `headroom wrap codex --`) when installed, enabled, and supported.
+# Headroom context optimizer wrapper (`headroom wrap claude --` / `headroom wrap codex --`) when installed, enabled, healthy, and supported.
 MAIN_LAUNCH_CMD=""
 if [ "$MAIN_CLI_TYPE" = "codex" ]; then
   prepare_alt_cli_workspace "$INSTALL_DIR" "codex"
   _codex_cmd="$(sh_single_quote "$CODEX_BIN")"
+  _codex_dir="${CODEX_BIN%/*}"
+  _codex_path_prefix=""
+  [ -n "$_codex_dir" ] && [ "$_codex_dir" != "$CODEX_BIN" ] && _codex_path_prefix="PATH=$(sh_single_quote "$_codex_dir"):\"\$PATH\" "
   case "${MARVEEN_HEADROOM:-1}" in
     0|false|FALSE|off|OFF|no|NO) ;;
     *)
-      _hr_bin="$(command -v headroom 2>/dev/null || true)"
-      [ -z "$_hr_bin" ] && [ -x "$HOME/.local/bin/headroom" ] && _hr_bin="$HOME/.local/bin/headroom"
-      [ -z "$_hr_bin" ] && [ -x "$HOME/.local/share/marveen-headroom-venv/bin/headroom" ] && _hr_bin="$HOME/.local/share/marveen-headroom-venv/bin/headroom"
-      if [ -n "$_hr_bin" ] && "$_hr_bin" wrap --help 2>&1 | grep -q "codex"; then
-        _codex_cmd="$(sh_single_quote "$_hr_bin") wrap codex --"
+      if [ -z "${OPENAI_BASE_URL:-}" ] || [ "${MARVEEN_HEADROOM_WRAP_CUSTOM_URL:-0}" = "1" ]; then
+        _hr_bin="$(command -v headroom 2>/dev/null || true)"
+        [ -z "$_hr_bin" ] && [ -x "$HOME/.local/bin/headroom" ] && _hr_bin="$HOME/.local/bin/headroom"
+        [ -z "$_hr_bin" ] && [ -x "$HOME/.local/share/marveen-headroom-venv/bin/headroom" ] && _hr_bin="$HOME/.local/share/marveen-headroom-venv/bin/headroom"
+        if [ -n "$_hr_bin" ] && "$_hr_bin" --version >/dev/null 2>&1 && "$_hr_bin" wrap --help 2>&1 | grep -q "codex"; then
+          _codex_cmd="$(sh_single_quote "$_hr_bin") wrap codex --"
+        fi
+        unset _hr_bin
       fi
-      unset _hr_bin
       ;;
   esac
-  MAIN_LAUNCH_CMD="${MCP_BATCH_ENV}unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${_codex_cmd} --dangerously-bypass-approvals-and-sandbox ${CODEX_MODEL_FLAG}"
-  unset _codex_cmd
-elif [ "$MAIN_CLI_TYPE" = "agy" ]; then
+  _alt_env=""
+  for _ek in OPENAI_API_KEY OPENAI_BASE_URL; do
+    eval "_ev=\${${_ek}:-}"
+    [ -n "$_ev" ] && _alt_env="${_alt_env}export ${_ek}=$(sh_single_quote "$_ev") && "
+  done
+  AUTH_PANE_ENV="" STATE_DIR_ENV="" CFG_ENV="" AUTH_POST_ENV="" CUSTOM_PROVIDER_ENV="" GROMZO_ENV="" MODEL_FLAG="" CHANNELS_ARG=""
+  MAIN_ALT_LAUNCH_CMD="${_alt_env}unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${_codex_path_prefix}${_codex_cmd} --dangerously-bypass-approvals-and-sandbox ${CODEX_MODEL_FLAG}"
+  unset _codex_cmd _codex_dir _codex_path_prefix _alt_env _ek _ev
+elif [ "${MAIN_CLI_TYPE:-claude}" = "agy" ]; then
   prepare_alt_cli_workspace "$INSTALL_DIR" "agy"
-  MAIN_LAUNCH_CMD="${MCP_BATCH_ENV}unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && $(sh_single_quote "$AGY_BIN") --dangerously-skip-permissions ${AGY_MODEL_FLAG}"
+  _agy_dir="${AGY_BIN%/*}"
+  _agy_path_prefix=""
+  [ -n "$_agy_dir" ] && [ "$_agy_dir" != "$AGY_BIN" ] && _agy_path_prefix="PATH=$(sh_single_quote "$_agy_dir"):\"\$PATH\" "
+  _alt_env=""
+  for _ek in GEMINI_API_KEY GOOGLE_API_KEY GEMINI_API_BASE; do
+    eval "_ev=\${${_ek}:-}"
+    [ -n "$_ev" ] && _alt_env="${_alt_env}export ${_ek}=$(sh_single_quote "$_ev") && "
+  done
+  AUTH_PANE_ENV="" STATE_DIR_ENV="" CFG_ENV="" AUTH_POST_ENV="" CUSTOM_PROVIDER_ENV="" GROMZO_ENV="" MODEL_FLAG="" CHANNELS_ARG=""
+  MAIN_ALT_LAUNCH_CMD="${_alt_env}unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${_agy_path_prefix}$(sh_single_quote "$AGY_BIN") --dangerously-skip-permissions ${AGY_MODEL_FLAG}"
+  unset _agy_dir _agy_path_prefix _alt_env _ek _ev
 else
   case "${MARVEEN_HEADROOM:-1}" in
     0|false|FALSE|off|OFF|no|NO) ;;
@@ -2056,23 +2085,37 @@ else
         _hr_bin="$(command -v headroom 2>/dev/null || true)"
         [ -z "$_hr_bin" ] && [ -x "$HOME/.local/bin/headroom" ] && _hr_bin="$HOME/.local/bin/headroom"
         [ -z "$_hr_bin" ] && [ -x "$HOME/.local/share/marveen-headroom-venv/bin/headroom" ] && _hr_bin="$HOME/.local/share/marveen-headroom-venv/bin/headroom"
-        if [ -n "$_hr_bin" ]; then
+        if [ -n "$_hr_bin" ] && "$_hr_bin" --version >/dev/null 2>&1; then
           CLAUDE="$(sh_single_quote "$_hr_bin") wrap claude --"
         fi
         unset _hr_bin
       fi
       ;;
   esac
-  MAIN_LAUNCH_CMD=""
+  MAIN_ALT_LAUNCH_CMD=""
 fi
 
-if [ "$MAIN_CLI_TYPE" = "claude" ]; then
-  env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
-    "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${AUTH_POST_ENV}${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}${CHANNELS_ARG}"
-else
-  env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
-    "$MAIN_LAUNCH_CMD"
+# Ensure channel-coordinator is active for non-Claude orchestrators (Codex / Antigravity)
+# that have no native `--channels` poller and depend on coordinator backfill + MCP telegram_reply.
+if [ "${MAIN_CLI_TYPE:-claude}" != "claude" ] && [ "$CHANNEL_PROVIDER" = "telegram" ] && [ "${CHANNEL_UNCONFIGURED:-0}" != "1" ] && [ -f "$INSTALL_DIR/dist/channel-coordinator.js" ]; then
+  if ! pgrep -f "channel-coordinator\.js" >/dev/null 2>&1; then
+    _svc_id="marveen"
+    [ -f "$INSTALL_DIR/.env" ] && _svc_val="$(grep -E '^SERVICE_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d "\"' \r")" && [ -n "$_svc_val" ] && _svc_id="$_svc_val"
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "${_svc_id}-channel-coordinator.service" >/dev/null 2>&1; then
+      systemctl --user enable --now "${_svc_id}-channel-coordinator.service" >/dev/null 2>&1 || true
+    elif [ "$(uname -s 2>/dev/null)" = "Linux" ] && command -v systemctl >/dev/null 2>&1 && systemctl cat "${_svc_id}-channel-coordinator.service" >/dev/null 2>&1; then
+      systemctl start "${_svc_id}-channel-coordinator.service" >/dev/null 2>&1 || true
+    elif [ "$(uname -s 2>/dev/null)" != "Darwin" ]; then
+      _cc_node="$(command -v node 2>/dev/null || true)"
+      [ -n "$_cc_node" ] && nohup "$_cc_node" "$INSTALL_DIR/dist/channel-coordinator.js" >>"$INSTALL_DIR/store/channel-coordinator.log" 2>>"$INSTALL_DIR/store/channel-coordinator.error.log" 9>&- </dev/null &
+      unset _cc_node
+    fi
+    unset _svc_id _svc_val
+  fi
 fi
+
+env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
+  "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${AUTH_POST_ENV}${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}${MAIN_ALT_LAUNCH_CMD:-$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} }${MODEL_FLAG}${CHANNELS_ARG}"
 # The server certainly exists now: see CHANNELSAUTHRACE923 above.
 _tmux_set_auth_globals
 # remain-on-exit: without this, if the pane's claude process dies for ANY
@@ -2147,7 +2190,7 @@ _eperm_restarted=0
 _boot_guard_s="${CHANNELS_BOOT_GUARD_S:-90}"
 case "$_boot_guard_s" in ''|*[!0-9]*|0) _boot_guard_s=90 ;; esac
 i=0
-if [ "$MAIN_CLI_TYPE" != "claude" ]; then
+if [ "${MAIN_CLI_TYPE:-claude}" != "claude" ]; then
   sleep 2
   i="$_boot_guard_s"
 fi
@@ -2183,14 +2226,9 @@ while [ "$i" -lt "$_boot_guard_s" ]; do
         elif [ -e "$INSTALL_DIR/CLAUDE.md" ]; then
           ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
         fi
-        if [ "$MAIN_CLI_TYPE" = "claude" ]; then
-          env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
-            "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${AUTH_POST_ENV}${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}${CHANNELS_ARG}"
-        else
-          prepare_alt_cli_workspace "$_CHANNELS_STARTDIR" "$MAIN_CLI_TYPE"
-          env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
-            "$MAIN_LAUNCH_CMD"
-        fi
+        [ "${MAIN_CLI_TYPE:-claude}" = "claude" ] || prepare_alt_cli_workspace "$_CHANNELS_STARTDIR" "$MAIN_CLI_TYPE"
+        env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
+          "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${AUTH_POST_ENV}${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}${MAIN_ALT_LAUNCH_CMD:-$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} }${MODEL_FLAG}${CHANNELS_ARG}"
         # See the primary new-session above: remain-on-exit keeps the pane
         # (and session) alive if claude dies early, so the scheduled relaunch
         # can always find it. This is the /tmp-fallback launch path, same fix.
@@ -2238,12 +2276,12 @@ sleep 1
 # it was the one place where a name reached the pane unchecked. The session
 # then keeps its default name, and this line says why.
 # shellcheck source=lib/main-rename.sh
-if [ "$MAIN_CLI_TYPE" = "claude" ]; then
-  if . "$INSTALL_DIR/scripts/lib/main-rename.sh"; then
-    main_rename_send "$TMUX" "=$SESSION:" "$_bot_name" || true
-  else
-    echo "$(date '+%F %T') channels.sh: scripts/lib/main-rename.sh could not be loaded -- boot /rename NOT typed, the session keeps its default name (TYPINGPATHS1114)" >&2
-  fi
+if [ "${MAIN_CLI_TYPE:-claude}" = "claude" ]; then
+if . "$INSTALL_DIR/scripts/lib/main-rename.sh"; then
+  main_rename_send "$TMUX" "=$SESSION:" "$_bot_name" || true
+else
+  echo "$(date '+%F %T') channels.sh: scripts/lib/main-rename.sh could not be loaded -- boot /rename NOT typed, the session keeps its default name (TYPINGPATHS1114)" >&2
+fi
 fi
 unset _bot_name
 

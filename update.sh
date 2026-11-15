@@ -966,6 +966,10 @@ install_keepalive_probe_timer() {
     _tz_line="# no explicit TZ detected; inheriting host default"
     _tz="$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || true)"
     [ -n "$_tz" ] && [ "$_tz" != "UTC" ] && _tz_line="Environment=TZ=$_tz"
+    local _brew_seg=""
+    if command -v brew >/dev/null 2>&1; then
+      _brew_seg=":$(dirname "$(command -v brew)")"
+    fi
     cat >"$units_dir/${_ka_unit}.service" <<EOF
 [Unit]
 Description=${_bot_name} token-free idle-path channel keepalive probe
@@ -974,7 +978,7 @@ Description=${_bot_name} token-free idle-path channel keepalive probe
 Type=oneshot
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/scripts/channel-keepalive-probe.sh
-Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin${_brew_seg}:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 ${_tz_line}
 StandardOutput=append:$INSTALL_DIR/store/channel-keepalive-probe.log
@@ -1217,6 +1221,10 @@ install_main_inbox_observer_unit() {
     _tz_line="# no explicit TZ detected; inheriting host default"
     _tz="$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || true)"
     [ -n "$_tz" ] && [ "$_tz" != "UTC" ] && _tz_line="Environment=TZ=$_tz"
+    local _brew_seg=""
+    if command -v brew >/dev/null 2>&1; then
+      _brew_seg=":$(dirname "$(command -v brew)")"
+    fi
     cat >"$units_dir/${_io_unit}.service" <<EOF
 [Unit]
 Description=${_bot_name} out-of-process observer of the main agent's inbox queue
@@ -1225,7 +1233,7 @@ Description=${_bot_name} out-of-process observer of the main agent's inbox queue
 Type=oneshot
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/scripts/main-inbox-observer.sh
-Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin${_brew_seg}:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 ${_tz_line}
 StandardOutput=append:$INSTALL_DIR/store/main-inbox-observer.log
@@ -1411,6 +1419,10 @@ install_channel_coordinator_unit() {
       _tz_line="# no explicit TZ detected; inheriting host default"
       _tz="$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || true)"
       [ -n "$_tz" ] && [ "$_tz" != "UTC" ] && _tz_line="Environment=TZ=$_tz"
+      local _brew_seg=""
+      if command -v brew >/dev/null 2>&1; then
+        _brew_seg=":$(dirname "$(command -v brew)")"
+      fi
       cat >"$units_dir/${_cc_unit}.service" <<EOF
 [Unit]
 Description=${_bot_name} Channel Coordinator (telegram)
@@ -1427,7 +1439,7 @@ Restart=on-failure
 RestartSec=5
 StandardOutput=append:$INSTALL_DIR/store/channel-coordinator.log
 StandardError=append:$INSTALL_DIR/store/channel-coordinator.error.log
-Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin${_brew_seg}:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 Environment=USER=$USER
 ${_tz_line}
@@ -1925,6 +1937,9 @@ if [ -d "$SEED_SKILLS_DIR" ]; then
   if [ "$SEED_NEW" -gt 0 ] || [ "$SEED_SKIP" -gt 0 ] || [ "$SEED_FORCED" -gt 0 ]; then
     echo -e "  ${GREEN}✓${NC} Seed skills: ${SEED_NEW} új, ${SEED_FORCED} frissítve, ${SEED_SKIP} kihagyva"
   fi
+fi
+if [ -f "$INSTALL_DIR/scripts/lib/main-cli-type.sh" ]; then
+  (. "$INSTALL_DIR/scripts/lib/main-cli-type.sh"; sync_universal_skills_dirs "$SKILLS_DIR")
 fi
 
 # Seed scheduled tasks (requires MAIN_AGENT_ID from .env for template substitution)

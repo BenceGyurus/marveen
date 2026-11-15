@@ -2458,8 +2458,8 @@ else
   PLUGIN_SHORT="slack-channel"
 fi
 
-if [ -z "$PLUGIN_ID" ]; then
-  :
+if [ -z "$PLUGIN_ID" ] || ! command -v claude >/dev/null 2>&1; then
+  [ -n "$PLUGIN_ID" ] && echo -e "  ${DIM}claude CLI nincs telepitve -- ${CHANNEL_PROVIDER} Claude plugin kihagyva (channel-coordinator + MCP aktiv)${NC}"
 else
 echo -e "  ${CHANNEL_PROVIDER} plugin telepites..."
 claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null || true
@@ -2536,6 +2536,9 @@ if [ -d "$SEED_SKILLS_DIR" ]; then
   if [ "$SEED_NEW" -gt 0 ] || [ "$SEED_SKIP" -gt 0 ]; then
     ok "Seed skills: ${SEED_NEW} uj, ${SEED_SKIP} kihagyva (mar letezik)"
   fi
+fi
+if [ -f "$INSTALL_DIR/scripts/lib/main-cli-type.sh" ]; then
+  (. "$INSTALL_DIR/scripts/lib/main-cli-type.sh"; sync_universal_skills_dirs "$SKILLS_DIR")
 fi
 
 INSTALL_STEP="ollama-whisper"
@@ -2820,7 +2823,7 @@ RestartSec=5
 LimitNOFILE=16384
 StandardOutput=append:$INSTALL_DIR/store/dashboard.log
 StandardError=append:$INSTALL_DIR/store/dashboard.error.log
-Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 ${TZ_LINE}
 
@@ -2867,7 +2870,7 @@ Restart=always
 RestartSec=10
 StandardOutput=append:$INSTALL_DIR/store/channels.log
 StandardError=append:$INSTALL_DIR/store/channels.error.log
-Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 Environment=USER=$USER
 Environment=TERM=xterm-256color
@@ -2895,7 +2898,7 @@ Restart=on-failure
 RestartSec=5
 StandardOutput=append:$INSTALL_DIR/store/channel-coordinator.log
 StandardError=append:$INSTALL_DIR/store/channel-coordinator.error.log
-Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 Environment=USER=$USER
 ${TZ_LINE}
@@ -2913,7 +2916,7 @@ Description=${BOT_NAME} Reggeli Napindito
 Type=oneshot
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/scripts/morning-briefing.sh
-Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 ${TZ_LINE}
 EOF
@@ -2980,7 +2983,7 @@ Description=${BOT_NAME} token-free idle-path channel keepalive probe
 Type=oneshot
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/scripts/channel-keepalive-probe.sh
-Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 ${TZ_LINE}
 StandardOutput=append:$INSTALL_DIR/store/channel-keepalive-probe.log
@@ -3021,7 +3024,7 @@ Description=${BOT_NAME} out-of-process observer of the main agent's inbox queue
 Type=oneshot
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/scripts/main-inbox-observer.sh
-Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 ${TZ_LINE}
 StandardOutput=append:$INSTALL_DIR/store/main-inbox-observer.log
@@ -3130,13 +3133,7 @@ if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; the
   # ${MORN_UNIT}.timer is deliberately NOT in this list -- the seeded
   # reggeli-napindito scheduled task already delivers the morning briefing at
   # 07:30 from inside the live channel session. See the timer's comment above.
-  _ENABLE_UNITS=("${DASH_UNIT}" "${CHAN_UNIT}" "${KEEPALIVE_UNIT}.timer" "${INBOX_OBSERVER_UNIT}.timer" "${SERVICE_ID}-host-watchdog.service")
-  _START_UNITS=("${DASH_UNIT}" "${CHAN_UNIT}")
-  if [ "$CHANNEL_PROVIDER" = "telegram" ] && [ -n "${BOT_TOKEN:-}" ]; then
-    _ENABLE_UNITS+=("${COORD_UNIT}.service")
-    _START_UNITS+=("${COORD_UNIT}")
-  fi
-  if systemctl --user enable "${_ENABLE_UNITS[@]}" 2>/dev/null; then
+  if systemctl --user enable "${DASH_UNIT}" "${CHAN_UNIT}" "${KEEPALIVE_UNIT}.timer" "${INBOX_OBSERVER_UNIT}.timer" "${SERVICE_ID}-host-watchdog.service" 2>/dev/null; then
     ok "systemd unitok generalva es engedelyezve"
   else
     warn "A unit-fajlok elkeszultek, de az engedelyezesuk nem sikerult -- ujrainditas utan a szolgaltatasok nem indulnak el maguktol."
@@ -3153,11 +3150,14 @@ if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; the
     # install-macos.sh, where the label is already on its own line.
     echo -e "  ${DIM}Javitas most:${NC}"
     echo -e "  ${DIM}systemctl --user enable \\${NC}"
-    echo -e "  ${DIM}    ${_ENABLE_UNITS[*]}${NC}"
+    echo -e "  ${DIM}    ${DASH_UNIT} ${CHAN_UNIT} ${KEEPALIVE_UNIT}.timer ${INBOX_OBSERVER_UNIT}.timer ${SERVICE_ID}-host-watchdog.service${NC}"
   fi
-  systemctl --user start "${_START_UNITS[@]}" 2>/dev/null || true
+  systemctl --user start "${DASH_UNIT}" "${CHAN_UNIT}" 2>/dev/null || true
+  if [ "$CHANNEL_PROVIDER" = "telegram" ] && [ -n "${BOT_TOKEN:-}" ]; then
+    systemctl --user enable --now "${COORD_UNIT}.service" 2>/dev/null || true
+  fi
   sleep 2
-  for svc in "${_START_UNITS[@]}"; do
+  for svc in "${DASH_UNIT}" "${CHAN_UNIT}"; do
     if systemctl --user is-active --quiet "$svc" 2>/dev/null; then
       ok "$svc fut"
     else
@@ -3306,6 +3306,9 @@ if { [ "$CHANNEL_PROVIDER" = "telegram" ] || [ "$CHANNEL_PROVIDER" = "teams" ]; 
   echo -e "  ${DIM}Utana: source ~/.bashrc && ./scripts/start.sh${NC}"
 fi
 PLUGIN_CHECK_PATTERN="${CHANNEL_PROVIDER}"
+if [ "$CHANNEL_PROVIDER" != "gromzo" ] && ! command -v claude >/dev/null 2>&1; then
+  ok "Nem Claude orchestrator / claude CLI hianyzik -- channel-coordinator + MCP aktiv"
+else
 if [ "$CHANNEL_PROVIDER" = "gromzo" ]; then
   ok "Gromzo: a csatorna-plugint a Bridge Gromzo-lepese ellenorzi"
 elif ! claude plugin list 2>/dev/null | grep -q "$PLUGIN_CHECK_PATTERN"; then
@@ -3314,6 +3317,7 @@ elif ! claude plugin list 2>/dev/null | grep -q "$PLUGIN_CHECK_PATTERN"; then
   echo -e "  ${DIM}Utana: systemctl --user restart ${CHAN_UNIT}${NC}"
 else
   ok "${CHANNEL_PROVIDER} plugin ellenorizve"
+fi
 fi
 
 # INSTPAIRPATH930: the access.json the pairing must read AND write. channels.sh moves the

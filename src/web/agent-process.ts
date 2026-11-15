@@ -5,7 +5,7 @@ import { homedir, tmpdir } from 'node:os'
 import { execFile, execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { AGENT_LOCAL_BASE_URL } from '../config.js'
-import { makeLazyBinResolver } from '../platform.js'
+import { makeLazyBinResolver, tryResolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import {
   paneLooksIdle,
@@ -126,7 +126,7 @@ const tmuxBin = makeLazyBinResolver('tmux')
 const claudeBin = makeLazyBinResolver('claude')
 const codexBin = makeLazyBinResolver('codex')
 const agyBin = makeLazyBinResolver('agy')
-import { getCliTypeForModel, getCliProvider, stripCliModelPrefix, prepareWorkspaceForCli, resolveHeadroomLauncher, type CliType } from '../cli-detector.js'
+import { getCliTypeForModel, getCliProvider, stripCliModelPrefix, prepareWorkspaceForCli, resolveHeadroomLauncher, resolveCliBinary, type CliType } from '../cli-detector.js'
 
 // Shared async pacing helper. Replaces the blocking synchronous `/bin/sleep`
 // (execFileSync) pauses in the tmux-driving injection hot-path so a pacing wait
@@ -2350,13 +2350,17 @@ function startRemoteAgentProcess(
 
   const session = agentSessionName(name)
 
-  // Pre-flight: claude must be on PATH on the laptop, else the session starts
+  const model = readAgentModel(name)
+  const remoteCli = getCliTypeForModel(model)
+  const remoteBin = remoteCli === 'codex' ? 'codex' : remoteCli === 'agy' ? 'agy' : 'claude'
+
+  // Pre-flight: configured CLI must be on PATH on the remote host, else the session starts
   // and instantly dies with a silent "command not found".
   try {
-    const probe = buildSshExec(host, 'which claude')
+    const probe = buildSshExec(host, `which ${remoteBin}`)
     execFileSync(probe.file, probe.args, { timeout: 8000, stdio: 'ignore' })
   } catch {
-    return { ok: false, error: `claude not found on PATH on '${host}' (or host unreachable)` }
+    return { ok: false, error: `${remoteBin} not found on PATH on '${host}' (or host unreachable)` }
   }
 
   // --continue only when the remote session dir already exists. workdir is an
@@ -2375,7 +2379,6 @@ function startRemoteAgentProcess(
     logger.info({ name, host }, 'remote agent opted out of --continue (agent-config.json "continue": false), launching fresh')
   }
 
-  const model = readAgentModel(name)
   const cmd = buildRemoteLaunchCommand({ workdir, model, continue: hasPriorSession })
 
   try {
@@ -2550,16 +2553,22 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
   // existing installs is byte-identical.
   if (readAgentMemoryIsolation(name)) provisionMemoryBoundaryDir(dir)
 
-  // Linux shared-credentials race guard (opt-in, default OFF; no-op on macOS
-  // and without the flag). Runs before launch so a valid setup-token retires
-  // the rotating ~/.claude/.credentials.json; idempotent, so calling it per
-  // start also self-heals if Claude Code recreates the file on a refresh.
-  renameSharedCredentialsIfSafe(claudeBin())
+  const preCliType: CliType = readAgentCustomProvider(name)
+    ? 'claude'
+    : getCliTypeForModel(readAgentModel(name))
+  if (preCliType === 'claude') {
+    // Linux shared-credentials race guard (opt-in, default OFF; no-op on macOS
+    // and without the flag). Runs before launch so a valid setup-token retires
+    // the rotating ~/.claude/.credentials.json; idempotent, so calling it per
+    // start also self-heals if Claude Code recreates the file on a refresh.
+    const resolvedClaude = tryResolveFromPath('claude')
+    if (resolvedClaude) renameSharedCredentialsIfSafe(resolvedClaude)
 
-  // Shared-root agents park on the first-run "Select login method" picker when
-  // ~/.claude.json lost hasCompletedOnboarding (2026-07-15 bootcamp incident);
-  // idempotent re-seed before every launch.
-  ensureSharedClaudeOnboarded()
+    // Shared-root agents park on the first-run "Select login method" picker when
+    // ~/.claude.json lost hasCompletedOnboarding (2026-07-15 bootcamp incident);
+    // idempotent re-seed before every launch.
+    ensureSharedClaudeOnboarded()
+  }
 
 
   if (isAgentRunning(name)) return { ok: false, error: 'Agent is already running' }
@@ -3425,12 +3434,33 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     const hasCustomClaudeBaseUrl = cliType === 'claude' && (isCustom || model.includes('/') || model.startsWith('deepseek-') || model.startsWith('minimax-'))
     const headroomClaudeWrap = cliType === 'claude' ? resolveHeadroomLauncher('claude', '', { hasCustomBaseUrl: hasCustomClaudeBaseUrl }) : ''
     const claudeModelArg = model.startsWith('claude:') ? (cleanModel || model) : model
+    const altEnvKeys = ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GEMINI_API_BASE', 'OPENAI_API_KEY', 'OPENAI_BASE_URL'] as const
+    const altDotEnv = cliType !== 'claude' ? readEnvFile([...altEnvKeys]) : {}
+    const resolveAltEnvVal = (k: (typeof altEnvKeys)[number]): string => {
+      const val = (altDotEnv[k] ?? process.env[k] ?? '').trim()
+      return val && isSingleLineEnvValue(val) ? val : ''
+    }
+    const altProviderExports = cliType !== 'claude'
+      ? altEnvKeys
+          .map((k) => {
+            const val = resolveAltEnvVal(k)
+            return val ? `export ${k}=${shSingleQuote(val)}` : ''
+          })
+          .filter(Boolean)
+          .join(' && ')
+      : ''
+    const hasCustomCodexBaseUrl = cliType === 'codex' && Boolean(resolveAltEnvVal('OPENAI_BASE_URL'))
+    const hasCustomAgyBaseUrl = cliType === 'agy' && Boolean(resolveAltEnvVal('GEMINI_API_BASE'))
+    const resolvedCodexBin = cliType === 'codex' ? (resolveCliBinary('codex') ?? codexBin()) : ''
+    const resolvedAgyBin = cliType === 'agy' ? (resolveCliBinary('agy') ?? agyBin()) : ''
+    const codexPathPrefix = resolvedCodexBin ? `PATH=${shSingleQuote(dirname(resolvedCodexBin))}:"$PATH" ` : ''
+    const agyPathPrefix = resolvedAgyBin ? `PATH=${shSingleQuote(dirname(resolvedAgyBin))}:"$PATH" ` : ''
     const altCliCmd = cliType === 'codex'
-      ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${resolveHeadroomLauncher('codex', codexBin())} ${continueFlag ? 'resume --last ' : ''}${skipFlag ? '--dangerously-bypass-approvals-and-sandbox ' : '--sandbox workspace-write '}${cleanModel ? `-m ${shSingleQuote(cleanModel)}` : ''}`.trimEnd()
+      ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${altProviderExports ? `${altProviderExports} && ` : ''}${codexPathPrefix}${resolveHeadroomLauncher('codex', resolvedCodexBin, { hasCustomBaseUrl: hasCustomCodexBaseUrl })} ${continueFlag ? 'resume --last ' : ''}${skipFlag ? '--dangerously-bypass-approvals-and-sandbox ' : '--sandbox workspace-write '}${cleanModel ? `-m ${shSingleQuote(cleanModel)}` : ''}`.trimEnd()
       : cliType === 'agy'
-        ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${resolveHeadroomLauncher('agy', agyBin())} ${continueFlag}${skipFlag}${cleanModel ? `--model ${shSingleQuote(cleanModel)}` : ''}`.trimEnd()
+        ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${altProviderExports ? `${altProviderExports} && ` : ''}${agyPathPrefix}${resolveHeadroomLauncher('agy', resolvedAgyBin, { hasCustomBaseUrl: hasCustomAgyBaseUrl })} ${continueFlag}${skipFlag}${cleanModel ? `--model ${shSingleQuote(cleanModel)}` : ''}`.trimEnd()
         : ''
-    const buildLaunchCmd = (launchCwd: string) => `${umaskPrefix}export PATH="${venvPathPrefix}/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${stateFence}${autoUpdaterEnv}${byoUnsetEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${helperTokenEnvPiece}${agentEgressEnv}${oauthTokenEnv}${providerEnv}${stateObserverEnv}cd "${launchCwd}" && ${altCliCmd || `${headroomClaudeWrap || `${claudeBin()}`} ${continueFlag}${skipFlag}--model ${shSingleQuote(claudeModelArg)} ${channelFlag}${worksourceFlags}${bashSandboxFlag}`.trimEnd()}`
+    const buildLaunchCmd = (launchCwd: string) => `${umaskPrefix}export PATH="${venvPathPrefix}/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${stateFence}${autoUpdaterEnv}${byoUnsetEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${helperTokenEnvPiece}${agentEgressEnv}${oauthTokenEnv}${providerEnv}${stateObserverEnv}cd "${launchCwd}" && ${altCliCmd ? altCliCmd : `${headroomClaudeWrap || `${claudeBin()}`} ${continueFlag}${skipFlag}--model ${shSingleQuote(claudeModelArg)} ${channelFlag}${worksourceFlags}${bashSandboxFlag}`.trimEnd()}`
     // The agent's own target: for a per-user agent this is what makes the whole
     // session (and every process inside it) belong to that uid. Passing null here
     // silently started it as the router's user -- measured 2026-08-19: the start
@@ -3458,6 +3488,7 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     // SAME verification decides: every plugin -- primary and extras -- must
     // come back, or the agent is relaunched fresh. The extras are probed in the
     // resumed claude's own process tree only (extra-channel-liveness.ts).
+    if (cliType === 'claude') {
     if (continueFlag && hasAnyChannel && name !== MAIN_AGENT_ID) {
       void verifyContinueLaunch({
         probe: () => {
@@ -3483,6 +3514,7 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
         }
       }).catch((err) => logger.error({ err, name }, 'resume verification crashed'))
     }
+    }
 
     // EPERM /tmp-fallback (2026-06-30, mirrors scripts/channels.sh:233+): on
     // Claude Code 2.1.183+ launching `--channels` in a TRUSTED project directory
@@ -3496,7 +3528,7 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     // attaches. Non-blocking setTimeout poller (the dashboard is single-threaded
     // -- a synchronous sleep loop would freeze the whole event loop). Only for
     // channel-having sub-agents; MAIN comes up via channels.sh, not this path.
-    if (hasAnyChannel && name !== MAIN_AGENT_ID) {
+    if (hasAnyChannel && name !== MAIN_AGENT_ID && cliType === 'claude') {
       const epermDeadline = Date.now() + 14_000
       let epermRestarted = false
       const checkEperm = () => {
@@ -3574,7 +3606,7 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     // is left untouched) and on an idle pane, so it never disturbs a colleague
     // mid-turn. Channel-less agents (hasChannel false) get no probe; MAIN never
     // takes this path (it comes up via channels.sh) but guard defensively.
-    if (hasChannel && name !== MAIN_AGENT_ID) {
+    if (hasChannel && name !== MAIN_AGENT_ID && cliType === 'claude') {
       schedulePluginUnlockAfterRespawn(session, provider.type)
     }
 

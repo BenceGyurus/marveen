@@ -1813,8 +1813,8 @@ function liveInputBoxFooterless(lines: string[]): string | null {
 // - codex renders a `›` (\u203a) prompt line above its status/shortcuts footer
 //   (`GPT-5.4 high · /path/to/dir`, `← for agents · ? for shortcuts`).
 //   Its idle placeholder is `› Ask Codex to do anything`.
-const AGY_FOOTER_RX = /^\s*(?:(?:\? for shortcuts\s+)?(?:auto|manual|plan|agent(?:\s*\([^)]+\))?)\s*·\s*\S|\? for shortcuts\s{2,}(?:Gemini|Claude|GPT)\b.*·\s*\S)/i
-const AGY_PLACEHOLDER_RX = /^\s*[>\u276F]\s*(?:(?:Auto|Manual|Plan) mode:.*\(shift\+tab to cycle\)|Type your message or @path\/to\/file)\s*$/i
+const AGY_FOOTER_RX = /^\s*(?:(?:\? for shortcuts\s+)?(?:auto|manual|plan|agent(?:\s*\([^)]+\))?)\s*·\s*\S|\? for shortcuts\s{2,}(?:Gemini|Claude|GPT|auto|manual|plan)\b|(?:.*\S\s*·\s*)?(?:Gemini|Claude|GPT|gemini-|gpt-)[^·]*·\s*\? for shortcuts\b)/i
+const AGY_PLACEHOLDER_RX = /^\s*[>\u276F]\s*(?:(?:Auto|Manual|Plan) mode:.*\(shift\+tab to cycle\)|Type your message.*|Ask anything.*)$/i
 const CODEX_PROMPT_RX = /^\s*\u203a(?:\s|$)/
 const CODEX_PLACEHOLDER_RX = /^\s*\u203a(?:\s*(?:Ask Codex to do anything|Write tests for @filename|Explain this codebase|Find and fix a bug in @filename|Summarize recent commits))?\s*$/
 const CODEX_MODEL_STATUS_RX = /^\s+\S[\w.\s%-]*·[\w.\s%·-]*\s*(?:~\/|\/|[A-Za-z]:\\)/
@@ -2033,7 +2033,7 @@ export function shouldRetrySubmit(
 
   const retryAlt = detectAltCliInput(retryPaneLines)
   if (retryAlt !== null) {
-    if (!retryAlt.parked || payloadHint.length < minHint) return false
+    if (!retryAlt.parked || retryAlt.busy || retryAlt.booting || payloadHint.length < minHint) return false
     return retryAlt.box.includes(payloadHint)
   }
 

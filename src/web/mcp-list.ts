@@ -2,15 +2,13 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { execFile } from 'node:child_process'
-import { resolveFromPath } from '../platform.js'
+import { tryResolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import {
   applyRefreshOutcome,
   scrubPaths as scrubPathsBase,
   type McpListEntry,
 } from '../mcp-list-parser.js'
-
-const CLAUDE = resolveFromPath('claude')
 
 function scrubPaths(msg: string): string {
   return scrubPathsBase(msg, homedir())
@@ -84,6 +82,15 @@ export function refreshMcpListCache(): Promise<McpListCache> {
     mcpListCache.refreshing = true
     const previousCount = mcpListCache.entries.length
     try {
+      const claudeBin = tryResolveFromPath('claude')
+      if (!claudeBin) {
+        mcpListCache = {
+          entries: [],
+          lastRefreshed: Date.now(),
+          refreshing: false,
+        }
+        return mcpListCache
+      }
       // Async exec so the event loop keeps serving other HTTP requests
       // while `claude mcp list` runs (up to 30s if a plugin's health
       // check is slow). Run from /tmp so no project-local .mcp.json
@@ -95,7 +102,7 @@ export function refreshMcpListCache(): Promise<McpListCache> {
         stderr: string
         execError: Error | null
       }>((resolve, reject) => {
-        execFile(CLAUDE, ['mcp', 'list'], {
+        execFile(claudeBin, ['mcp', 'list'], {
           cwd: getMcpListWorkingDir(),
           timeout: 30_000,
           encoding: 'utf-8',

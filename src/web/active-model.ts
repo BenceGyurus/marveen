@@ -209,7 +209,7 @@ export function readActiveModelFromProjectDir(workingDir: string, sinceUnixSec?:
   if (cached && cached.expiresAt > now) return cached.value
   let value: string | null = null
   try {
-    const alt = configDir === undefined ? findAltCliTranscriptForWorkingDir(workingDir) : null
+    const alt = findAltCliTranscriptForWorkingDir(workingDir)
     const dir = projectsDirFor(workingDir, configDir)
     if (!existsSync(dir)) {
       const altVal = alt ? readAltCliActiveModel(workingDir, sinceUnixSec) : null
@@ -248,7 +248,7 @@ export function readActiveModelFromProjectDir(workingDir: string, sinceUnixSec?:
 // the 14:47 turn, with nothing saying the reading was stale).
 export function readLastAssistantModel(workingDir: string, configDir?: string, homeDirOverride?: string): { model: string; atMs: number } | null {
   try {
-    const alt = configDir === undefined ? findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride) : null
+    const alt = findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride)
     const dir = projectsDirFor(workingDir, configDir)
     const newest = existsSync(dir)
       ? readdirSync(dir)
@@ -312,7 +312,7 @@ function isLocalCommandLine(e: { type?: unknown; message?: { content?: unknown }
 
 export function readLastTurnActivityMs(workingDir: string, configDir?: string, homeDirOverride?: string): number | null {
   try {
-    const alt = configDir === undefined ? findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride) : null
+    const alt = findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride)
     const dir = projectsDirFor(workingDir, configDir)
     const newest = existsSync(dir)
       ? readdirSync(dir)
@@ -392,7 +392,7 @@ export function readContextTokensFromProjectDir(workingDir: string, configDir?: 
   if (cached && cached.expiresAt > now) return cached.value
   let value: number | null = null
   try {
-    const alt = configDir === undefined ? findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride) : null
+    const alt = findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride)
     const dir = projectsDirFor(workingDir, configDir)
     const jsonls = existsSync(dir)
       ? readdirSync(dir)
@@ -454,10 +454,8 @@ export function readTranscriptMtimeFromProjectDir(workingDir: string, configDir?
         if (newest === null || m > newest) newest = m
       }
     }
-    if (configDir === undefined) {
-      const alt = findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride)
-      if (alt && (newest === null || alt.mtimeMs > newest)) newest = alt.mtimeMs
-    }
+    const alt = findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride)
+    if (alt && (newest === null || alt.mtimeMs > newest)) newest = alt.mtimeMs
     return newest
   } catch { return null }
 }
@@ -485,7 +483,7 @@ export function readTranscriptTailFromProjectDir(
   homeDirOverride?: string,
 ): string | null {
   try {
-    const alt = configDir === undefined ? findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride) : null
+    const alt = findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride)
     const dir = projectsDirFor(workingDir, configDir)
     let newest: { path: string; m: number } | null = null
     if (existsSync(dir)) {
@@ -573,7 +571,7 @@ export function readLastConversationTsFromProjectDir(
   homeDirOverride?: string,
 ): number | null {
   try {
-    const alt = configDir === undefined ? findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride) : null
+    const alt = findAltCliTranscriptForWorkingDir(workingDir, homeDirOverride)
     const dir = projectsDirFor(workingDir, configDir)
     let newestFile: string | null = null
     let newestMtime = -1

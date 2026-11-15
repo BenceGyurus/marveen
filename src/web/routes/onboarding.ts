@@ -22,7 +22,7 @@ import { isManagedSettingsReady, getManagedSettingsSudoCommand } from './agents.
 import { mayActAsOwner, mayActAsOwnerOrFirstRun, refuseOwner, OWNER_SESSION_REQUIRED } from './auth.js'
 import { assertEnvEntry } from '../../env.js'
 import { mainGromzoPrimaryReady } from '../main-gromzo-launch.js'
-import { resolveInstructionFilePath } from '../../cli-detector.js'
+import { resolveInstructionFilePath, resolveConfiguredMainCliType } from '../../cli-detector.js'
 import type { RouteContext } from './types.js'
 
 const execFileAsync = promisify(execFile)
@@ -145,7 +145,36 @@ async function noClaudeCredentialYet(): Promise<boolean> {
   return !(await claudeAuthPresent())
 }
 
+function agyAuthPresent(): boolean {
+  if (readEnvValue('GEMINI_API_KEY') || readEnvValue('GOOGLE_API_KEY')) return true
+  if (process.env.GEMINI_API_KEY?.trim() || process.env.GOOGLE_API_KEY?.trim()) return true
+  const agyDir = join(homedir(), '.gemini', 'antigravity-cli')
+  for (const rel of ['oauth_creds.json', 'credentials.json', 'settings.json']) {
+    try {
+      const raw = readFileSync(join(agyDir, rel), 'utf-8').trim()
+      if (raw.length > 2) return true
+    } catch { /* ignore */ }
+  }
+  try {
+    const raw = readFileSync(join(homedir(), '.gemini', 'oauth_creds.json'), 'utf-8').trim()
+    if (raw.length > 2) return true
+  } catch { /* ignore */ }
+  return false
+}
+
+function codexAuthPresent(): boolean {
+  if (readEnvValue('OPENAI_API_KEY') || process.env.OPENAI_API_KEY?.trim()) return true
+  try {
+    const raw = readFileSync(join(homedir(), '.codex', 'auth.json'), 'utf-8').trim()
+    if (raw.length > 2) return true
+  } catch { /* ignore */ }
+  return false
+}
+
 async function claudeAuthPresent(): Promise<boolean> {
+  const mainCli = resolveConfiguredMainCliType(PROJECT_ROOT)
+  if (mainCli === 'agy') return agyAuthPresent()
+  if (mainCli === 'codex') return codexAuthPresent()
   if (readEnvValue('CLAUDE_CODE_OAUTH_TOKEN')) return true
   if (readEnvValue('ANTHROPIC_API_KEY')) return true
   try {
@@ -314,10 +343,15 @@ export async function tryHandleOnboarding(ctx: RouteContext): Promise<boolean> {
     // the same bun-child/process liveness definition channel-monitor and
     // channel-plugin-unlock already agree on. Fail-closed: any probe error
     // reads as "not live yet" -- the wizard just keeps waiting.
+    const mainCliType = resolveConfiguredMainCliType(PROJECT_ROOT)
     let channelLive = false
     try {
-      const claudePid = getClaudePidForSession(MAIN_CHANNELS_SESSION)
-      channelLive = claudePid != null && hasChannelPluginAlive(claudePid, CHANNEL_PROVIDER)
+      if (mainCliType !== 'claude') {
+        channelLive = agentsRunning()
+      } else {
+        const claudePid = getClaudePidForSession(MAIN_CHANNELS_SESSION)
+        channelLive = claudePid != null && hasChannelPluginAlive(claudePid, CHANNEL_PROVIDER)
+      }
     } catch {
       channelLive = false
     }
@@ -325,6 +359,7 @@ export async function tryHandleOnboarding(ctx: RouteContext): Promise<boolean> {
       identityConfirmed: identityConfirmed(),
       currentAgentName: readEnvValue('BRAND_NAME') || readEnvValue('BOT_NAME') || 'Marveen',
       currentOwnerName: readEnvValue('OWNER_NAME') || '',
+      mainCliType,
       claudeAuthPresent: claude,
       agentsRunning: running,
       channelConfigured: ch,
@@ -482,12 +517,36 @@ export async function tryHandleOnboarding(ctx: RouteContext): Promise<boolean> {
       refuseOwner(res, OWNER_SESSION_REQUIRED.error)
       return true
     }
-    let body: { token?: string; apiKey?: string } = {}
+    let body: { token?: string; apiKey?: string; provider?: string } = {}
     const raw = await readBodyOrRefuse(req, res)
     if (!raw) return true
     try { body = JSON.parse(raw.toString()) as typeof body } catch { /* empty */ }
+    const provider = (body.provider ?? '').trim().toLowerCase()
     const token = (body.token ?? '').trim()
     const apiKey = (body.apiKey ?? '').trim()
+    if (provider === 'agy' || provider === 'codex') {
+      const key = apiKey || token
+      if (!key) { json(res, { error: 'apiKey szukseges.', reason: 'missing' }, 400); return true }
+      if (/[\r\n\0]/.test(key)) { json(res, { error: 'A kulcs nem tartalmazhat sortorest.', reason: 'bad-key' }, 400); return true }
+      const hadAuthBefore = await claudeAuthPresent()
+      const envKey = provider === 'agy' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY'
+      try {
+        setEnvKey(envKey, key)
+      } catch (err) {
+        logger.error({ err, envKey }, 'onboarding: failed to persist provider API key to .env')
+        json(res, { error: 'Nem sikerult elmenteni az .env-be.', reason: 'write-failed' }, 500)
+        return true
+      }
+      let restarted = false
+      let restartError: string | null = null
+      if (!hadAuthBefore && agentsRunning()) {
+        const r = hardRestartMarveenChannels()
+        restarted = r.ok
+        if (!r.ok) restartError = r.error || 'restart failed'
+      }
+      json(res, restartError ? { ok: true, verified: true, restarted, restartError } : { ok: true, verified: true, restarted })
+      return true
+    }
     if (!token && !apiKey) { json(res, { error: 'token vagy apiKey szukseges.', reason: 'missing' }, 400); return true }
     if (token && !/^sk-ant-oat/.test(token)) { json(res, { error: 'A setup-token formatuma nem stimmel (sk-ant-oat...).', reason: 'bad-token' }, 400); return true }
     if (apiKey && !/^sk-ant-/.test(apiKey)) { json(res, { error: 'Az API-kulcs formatuma nem stimmel (sk-ant-...).', reason: 'bad-key' }, 400); return true }

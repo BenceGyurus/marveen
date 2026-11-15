@@ -14,7 +14,7 @@ import { logger } from '../logger.js'
 import { mainRelaunchSucceeded } from '../auto-restart.js'
 import { MAIN_AGENT_ID, SERVICE_ID, BOT_NAME, CHANNEL_PROVIDER, PROJECT_ROOT, RESPAWN_ENABLED } from '../config.js'
 import { launchableDistributionDefaultSync } from './default-model-guard.js'
-import { agentDir, listAgentNames, readAgentChannelProvider, readAgentRemoteHost, readAgentWorksourceChannel } from './agent-config.js'
+import { agentDir, listAgentNames, readAgentChannelProvider, readAgentCustomProvider, readAgentModel, readAgentRemoteHost, readAgentWorksourceChannel } from './agent-config.js'
 import { listKanbanCards, createAgentMessage } from '../db.js'
 import {
   agentHasChannel,
@@ -3129,7 +3129,28 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     // One ps snapshot for the whole liveness loop (null -> each probe takes its own).
     const sweepSnapshot = await takeProcSnapshotAsync()
     for (const t of targets) {
-      const claudePid = await getClaudePidForSessionAsync(t.session)
+      if (!t.isMarveen && t.agentName) {
+        const subCliType = readAgentCustomProvider(t.agentName)
+          ? 'claude'
+          : getCliTypeForModel(readAgentModel(t.agentName))
+        if (subCliType !== 'claude') {
+          agentDownSince.delete(t.session)
+          agentRestartFailures.delete(t.agentName)
+          clearPersistedAgentFailures(t.agentName)
+          clearPluginAbsent(t.session)
+          continue
+        }
+      }
+      const isMainNonClaude = t.isMarveen && mainOrchestratorCliType() !== 'claude'
+      if (isMainNonClaude && mainSessionRunsUnconfigured(t.provider)) {
+        if (!mainUnconfiguredNoted) {
+          mainUnconfiguredNoted = true
+          logger.info({ session: t.session, provider: t.provider }, 'Main session runs without its channel: no token configured -- no liveness action until one is set')
+        }
+        continue
+      }
+      if (isMainNonClaude) mainUnconfiguredNoted = false
+      const claudePid = isMainNonClaude ? null : await getClaudePidForSessionAsync(t.session)
       if (!claudePid) {
         if (!t.isMarveen && t.agentName) {
           const lastRestart = agentLastRestart.get(t.agentName)
@@ -3157,6 +3178,9 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
               marveenDownState = null
               marveenSuspectFirstSeen = null
             }
+          } else if (isMainNonClaude) {
+            if (t.provider === 'telegram') ensureChannelCoordinatorRunning()
+            handleMarveenUp()
           } else if (shouldEscalateMarveenDown()) {
             await handleMarveenDown()
           }
@@ -3519,11 +3543,41 @@ function delay(ms: number): Promise<void> { return new Promise((r) => setTimeout
 const monitorModuleLoadedAt = Date.now()
 let mainFirstWaitLogged = false
 
+let lastCoordinatorKickAt = 0
+function ensureChannelCoordinatorRunning(): void {
+  const now = Date.now()
+  if (now - lastCoordinatorKickAt < 60_000) return
+  const entry = join(PROJECT_ROOT, 'dist', 'channel-coordinator.js')
+  if (!existsSync(entry)) return
+  lastCoordinatorKickAt = now
+  execFile('pgrep', ['-f', 'channel-coordinator\\.js'], { timeout: 3000 }, (err) => {
+    if (!err) return
+    const unit = `${SERVICE_ID}-channel-coordinator.service`
+    execFile('systemctl', ['--user', 'enable', '--now', unit], { timeout: 8000 }, (sysErr) => {
+      if (!sysErr) {
+        logger.info({ unit }, 'Started channel-coordinator systemd user service for non-Claude orchestrator')
+        return
+      }
+      try {
+        const child = spawn(process.execPath, [entry], {
+          cwd: PROJECT_ROOT,
+          detached: true,
+          stdio: 'ignore',
+        })
+        child.unref()
+        logger.info({ pid: child.pid }, 'Spawned standalone channel-coordinator process for non-Claude orchestrator')
+      } catch (spawnErr) {
+        logger.warn({ err: spawnErr }, 'Failed to start channel-coordinator process')
+      }
+    })
+  })
+}
+
 /** The main session is up for the owner: its primary channel plugin and every co-listen plugin are alive. */
 function mainSessionChannelsReady(): boolean {
+  if (mainOrchestratorCliType() !== 'claude') return mainChannelsSessionExists()
   const claudePid = getClaudePidForSession(MAIN_CHANNELS_SESSION)
   if (claudePid == null) return false
-  if (mainOrchestratorCliType() !== 'claude') return true
   const primary = getMainAgentProvider()
   if (probeChannelPluginLiveness(claudePid, primary) !== 'alive') return false
   const extras = colistenProviders(primary, readExtraChannelPluginIds(), ALL_PROVIDER_TYPES.map((t) => getProvider(t)))

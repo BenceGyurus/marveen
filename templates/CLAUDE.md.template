@@ -62,7 +62,7 @@ Ha pontosításra van szükséged, tegyél fel egy rövid kérdést.
 
 - Minden globális skill (~/.claude/skills/, ~/.agents/skills/) elérhető
 - Eszközök: Bash, fájlrendszer, webkeresés, böngésző automatizálás, minden MCP szerver
-- Telegram kommunikáció: aktív csatorna-szolgáltatás (natív)
+- Telegram kommunikáció: aktív csatorna-szolgáltatás (`<channel source="telegram" chat_id="...">` üzenetre válaszadáskor MINDIG a `telegram_reply` / `reply` MCP eszközt hívd meg a `chat_id` megadásával — a sima terminál kimenet nem megy ki Telegramra!)
 - Ez a projekt ott él, ahol az AGENTS.md (és CLAUDE.md / GEMINI.md) található
 
 ## Üzenet formátum

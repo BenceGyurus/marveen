@@ -99,7 +99,7 @@ fi
 # comes up with no identity, no rules and no persona, and stays that way
 # until restarted by hand -- from the outside the creation looks failed.
 agent_is_scaffolded() {
-  [ -f "$1/CLAUDE.md" ] && [ -f "$1/SOUL.md" ]
+  { [ -f "$1/AGENTS.md" ] || [ -f "$1/CLAUDE.md" ]; } && [ -f "$1/SOUL.md" ]
 }
 
 # Self-test hook, mirroring --resolve-provider: evaluate the predicate and
@@ -216,7 +216,10 @@ if [ ! -d "$INSTALL_DIR/agents" ]; then
   exit 0
 fi
 
-CLAUDE_BIN="$(command -v claude)"
+[ -f "$INSTALL_DIR/scripts/lib/main-cli-type.sh" ] && . "$INSTALL_DIR/scripts/lib/main-cli-type.sh"
+CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
+CODEX_BIN="$(command -v codex 2>/dev/null || true)"
+AGY_BIN="$(command -v agy 2>/dev/null || true)"
 
 for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
   AGENT_ID=$(basename "$AGENT_DIR")
@@ -227,7 +230,7 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
   fi
 
   # Do not start a half-scaffolded agent: the wizard's LLM call may still be
-  # writing CLAUDE.md / SOUL.md. The next tick starts it once both exist.
+  # writing AGENTS.md / CLAUDE.md / SOUL.md. The next tick starts it once both exist.
   if ! agent_is_scaffolded "$AGENT_DIR"; then
     echo "$(timestamp) [watchdog] $AGENT_ID: personality files not ready yet (wizard still generating?), skipping this tick" >> "$LOG"
     continue
@@ -240,8 +243,13 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
   CHAN_DIR="$AGENT_DIR/.claude/channels/$AGENT_PROVIDER"
   BOT_TOKEN=$(grep "$TOKEN_VAR" "$CHAN_DIR/.env" 2>/dev/null | cut -d= -f2- | head -1)
   MODEL=$(python3 -c "import json; d=json.load(open('$AGENT_DIR/agent-config.json')); print(d.get('model','claude-haiku-4-5-20251001'))" 2>/dev/null || echo "claude-haiku-4-5-20251001")
+  CLI_TYPE="claude"
+  if command -v marveen_model_cli_type >/dev/null 2>&1; then
+    CLI_TYPE="$(marveen_model_cli_type "$MODEL" "$INSTALL_DIR")"
+  fi
+  RAW_MODEL="${MODEL#*:}"
 
-  if [ -z "$BOT_TOKEN" ]; then
+  if [ -z "$BOT_TOKEN" ] && [ "$CLI_TYPE" = "claude" ]; then
     echo "$(timestamp) [watchdog] $AGENT_ID: no $AGENT_PROVIDER bot token, skipping" >> "$LOG"
     continue
   fi
@@ -250,8 +258,18 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
   # FLEETVENV923: the fleet venv's bin/ first, as in startAgentProcess -- a
   # watchdog restart must not hand the agent a different python3 (#1626 review).
   FLEET_VENV_PREFIX="$(fleet_venv_prefix "$INSTALL_DIR" "$LOG")"
+  BASE_PATH="export PATH=\"${FLEET_VENV_PREFIX}\$HOME/.local/bin:/opt/homebrew/bin:\$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\""
 
-  CMD="${ISO_ENV}export PATH=\"${FLEET_VENV_PREFIX}\$HOME/.local/bin:/opt/homebrew/bin:\$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && export CLAUDE_CODE_DISABLE_AGENT_VIEW=1 && { [ \"\$(id -u)\" != 0 ] || export IS_SANDBOX=1; } && export ${STATE_ENV_VAR}=\"$CHAN_DIR\" && cd \"$AGENT_DIR\" && ${CLAUDE_BIN} --dangerously-skip-permissions --model '$MODEL' --channels plugin:${AGENT_PROVIDER}@claude-plugins-official$(agent_sandbox_flag "$AGENT_ID")"
+  if [ "$CLI_TYPE" = "codex" ]; then
+    [ -z "$CODEX_BIN" ] && { echo "$(timestamp) [watchdog] $AGENT_ID: codex not found on PATH, skipping" >> "$LOG"; continue; }
+    CMD="${ISO_ENV}${BASE_PATH} && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && export CLAUDE_CODE_DISABLE_AGENT_VIEW=1 && { [ \"\$(id -u)\" != 0 ] || export IS_SANDBOX=1; } && cd \"$AGENT_DIR\" && '${CODEX_BIN}' --dangerously-bypass-approvals-and-sandbox --no-alt-screen -m '$RAW_MODEL'"
+  elif [ "$CLI_TYPE" = "agy" ]; then
+    [ -z "$AGY_BIN" ] && { echo "$(timestamp) [watchdog] $AGENT_ID: agy not found on PATH, skipping" >> "$LOG"; continue; }
+    CMD="${ISO_ENV}${BASE_PATH} && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && export CLAUDE_CODE_DISABLE_AGENT_VIEW=1 && { [ \"\$(id -u)\" != 0 ] || export IS_SANDBOX=1; } && cd \"$AGENT_DIR\" && '${AGY_BIN}' --dangerously-skip-permissions --model '$RAW_MODEL'"
+  else
+    [ -z "$CLAUDE_BIN" ] && { echo "$(timestamp) [watchdog] $AGENT_ID: claude not found on PATH, skipping" >> "$LOG"; continue; }
+    CMD="${ISO_ENV}${BASE_PATH} && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && export CLAUDE_CODE_DISABLE_AGENT_VIEW=1 && { [ \"\$(id -u)\" != 0 ] || export IS_SANDBOX=1; } && export ${STATE_ENV_VAR}=\"$CHAN_DIR\" && cd \"$AGENT_DIR\" && ${CLAUDE_BIN} --dangerously-skip-permissions --model '$MODEL' --channels plugin:${AGENT_PROVIDER}@claude-plugins-official$(agent_sandbox_flag "$AGENT_ID")"
+  fi
 
   tmux new-session -d -s "$SESSION_NAME" "$CMD" 2>/dev/null
   sleep 2

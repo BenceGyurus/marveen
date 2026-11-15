@@ -16555,11 +16555,13 @@ function onbIdentityHtml(s) {
     + `<div id="onbMsg" class="onb-msg"></div>`
 }
 function onbStep1Html(s) {
+  const cli = (s && s.mainCliType) || 'claude'
+  const placeholder = cli === 'agy' ? 'AIza... (GEMINI_API_KEY)' : cli === 'codex' ? 'sk-... (OPENAI_API_KEY)' : 'sk-ant-oat01-...'
   return `<p>${escapeHtml(t('onboarding.step1.desc'))}</p>`
     + (s.claudeAuthPresent
       ? `<p class="onb-ok-line">${escapeHtml(t('onboarding.step1.auth_done'))}</p>`
       : `<label class="form-label-sm">${escapeHtml(t('onboarding.step1.token_label'))}</label>`
-        + `<input id="onbToken" type="password" class="onb-input" placeholder="sk-ant-oat01-..." autocomplete="off">`
+        + `<input id="onbToken" data-provider="${escapeHtml(cli)}" type="password" class="onb-input" placeholder="${placeholder}" autocomplete="off">`
         + `<div class="onb-hint">${escapeHtml(t('onboarding.step1.token_hint'))}</div>`
         + `<button class="btn-primary btn-compact" id="onbAuthBtn">${escapeHtml(t('onboarding.step1.save_btn'))}</button>`)
     + (s.claudeAuthPresent && !s.agentsRunning
@@ -16634,11 +16636,14 @@ function wireOnboarding(step) {
   if (step === 2) {
     const authBtn = document.getElementById('onbAuthBtn')
     if (authBtn) authBtn.addEventListener('click', async () => {
-      const token = (document.getElementById('onbToken').value || '').trim()
+      const tokenEl = document.getElementById('onbToken')
+      const token = ((tokenEl && tokenEl.value) || '').trim()
+      const provider = (tokenEl && tokenEl.getAttribute('data-provider')) || 'claude'
       if (!token) { onbMsg(t('onboarding.step1.token_empty'), true); return }
       authBtn.disabled = true; onbMsg(t('onboarding.saving'))
+      const authPayload = provider === 'agy' || provider === 'codex' ? { provider, apiKey: token } : { token }
       try {
-        const res = await fetch('/api/onboarding/claude-auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })
+        const res = await fetch('/api/onboarding/claude-auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(authPayload) })
         const d = await res.json().catch(() => ({}))
         if (!res.ok) { authBtn.disabled = false; if (await onbOwnerRefused(d)) return; onbMsg(d.code === 'owner_session_required' ? t('onboarding.step1.owner_login_required') : (d.error || t('onboarding.error')), true); return }
         // Fresh-install path: the server restarts the (previously

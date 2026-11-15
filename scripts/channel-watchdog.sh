@@ -186,17 +186,26 @@ EXTRA_SETTINGS_FLAG="$(main_extra_settings_flag "$INSTALL_DIR" "$PRIMARY_PLUGIN_
 
 # Non-Claude orchestrators (Codex / Antigravity) rely on channel-coordinator +
 # marveen_telegram MCP instead of Claude Code plugins or /loop keepalive files.
-_MAIN_CFG_MODEL="$(grep -E '^MAIN_AGENT_MODEL=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
-case "$_MAIN_CFG_MODEL" in
-  codex:*|openai:*|agy:*|antigravity:*|gpt-*|gemini-*|o1-*|o3-*|o4-*)
-    exit 0
-    ;;
-esac
+[ -f "$INSTALL_DIR/scripts/lib/main-cli-type.sh" ] && . "$INSTALL_DIR/scripts/lib/main-cli-type.sh"
+_MAIN_CFG_MODEL=""
+if command -v marveen_main_cli_type >/dev/null 2>&1; then
+  [ "$(marveen_main_cli_type "$INSTALL_DIR")" = "claude" ] || exit 0
+else
+  _MAIN_CFG_MODEL="$(grep -E '^MAIN_AGENT_MODEL=' "$INSTALL_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"'\r " || true)"
+  if [ -z "$_MAIN_CFG_MODEL" ] && [ -f "$INSTALL_DIR/.claude/settings.json" ]; then
+    _MAIN_CFG_MODEL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("model") or "")' "$INSTALL_DIR/.claude/settings.json" 2>/dev/null || true)"
+  fi
+  case "$_MAIN_CFG_MODEL" in
+    codex:*|openai:*|agy:*|antigravity:*|gpt-*|gemini-*|o1-*|o3-*|o4-*|*-low|*-medium|*-high|*-xhigh)
+      exit 0
+      ;;
+  esac
+fi
 
 # NB: use TMUX_BIN, not TMUX -- the latter is tmux's own env var (socket,pid,
 # session); assigning the binary path to it corrupts server-socket detection.
-TMUX_BIN="$(command -v tmux)"
-CLAUDE="$(command -v claude)"
+TMUX_BIN="$(command -v tmux 2>/dev/null || true)"
+CLAUDE="$(command -v claude 2>/dev/null || true)"
 if [ -z "$TMUX_BIN" ] || [ -z "$CLAUDE" ]; then
   log "tmux or claude not on PATH; cannot act. PATH=$PATH"
   exit 0

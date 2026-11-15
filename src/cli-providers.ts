@@ -172,6 +172,36 @@ export function isHeadroomEnabled(env: NodeJS.ProcessEnv = process.env): boolean
   return true
 }
 
+const headroomHealthCache = new Map<string, boolean>()
+
+function headroomCacheKey(headroomBin: string): string {
+  try {
+    const st = statSync(headroomBin)
+    return `${headroomBin}:${st.mtimeMs}:${st.size}`
+  } catch {
+    return headroomBin
+  }
+}
+
+export function isHeadroomBinaryHealthy(headroomBin: string): boolean {
+  const key = headroomCacheKey(headroomBin)
+  const cached = headroomHealthCache.get(key)
+  if (cached !== undefined) return cached
+  let ok = false
+  try {
+    execFileSync(headroomBin, ['--version'], {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    ok = true
+  } catch {
+    ok = false
+  }
+  headroomHealthCache.set(key, ok)
+  return ok
+}
+
 export function resolveHeadroomBinary(opts: { env?: NodeJS.ProcessEnv; homeDir?: string } = {}): string | null {
   const env = opts.env ?? process.env
   if (!isHeadroomEnabled(env)) return null
@@ -179,7 +209,7 @@ export function resolveHeadroomBinary(opts: { env?: NodeJS.ProcessEnv; homeDir?:
   const explicit = (env.MARVEEN_HEADROOM_BIN ?? env.HEADROOM_BIN ?? '').trim()
   if (explicit) {
     try {
-      if (existsSync(explicit) && statSync(explicit).isFile()) return explicit
+      if (existsSync(explicit) && statSync(explicit).isFile() && isHeadroomBinaryHealthy(explicit)) return explicit
     } catch { /* ignore */ }
     return null
   }
@@ -195,13 +225,13 @@ export function resolveHeadroomBinary(opts: { env?: NodeJS.ProcessEnv; homeDir?:
   ]
   for (const c of candidates) {
     try {
-      if (existsSync(c) && statSync(c).isFile()) return c
+      if (existsSync(c) && statSync(c).isFile() && isHeadroomBinaryHealthy(c)) return c
     } catch { /* ignore */ }
   }
 
   if (!opts.homeDir) {
     const fromPath = tryResolveFromPath('headroom')
-    if (fromPath) return fromPath
+    if (fromPath && isHeadroomBinaryHealthy(fromPath)) return fromPath
   }
   return null
 }
@@ -209,7 +239,8 @@ export function resolveHeadroomBinary(opts: { env?: NodeJS.ProcessEnv; homeDir?:
 const headroomWrapProbeCache = new Map<string, Set<string>>()
 
 function probeHeadroomWrapTargets(headroomBin: string): Set<string> {
-  const cached = headroomWrapProbeCache.get(headroomBin)
+  const key = headroomCacheKey(headroomBin)
+  const cached = headroomWrapProbeCache.get(key)
   if (cached) return cached
   const targets = new Set<string>(['claude', 'codex'])
   try {
@@ -220,8 +251,10 @@ function probeHeadroomWrapTargets(headroomBin: string): Set<string> {
     }).toLowerCase()
     if (/\bagy\b/.test(out)) targets.add('agy')
     if (/\bantigravity\b/.test(out)) targets.add('antigravity')
-  } catch { /* ignore */ }
-  headroomWrapProbeCache.set(headroomBin, targets)
+  } catch {
+    targets.clear()
+  }
+  headroomWrapProbeCache.set(key, targets)
   return targets
 }
 
@@ -244,19 +277,22 @@ export function resolveHeadroomLauncher(
   const headroomBin = resolveHeadroomBinary(opts)
   if (!headroomBin) return rawCliBin
 
-  // When a custom ANTHROPIC_BASE_URL is already injected (e.g. Ollama / OpenRouter / custom provider),
-  // avoid overriding ANTHROPIC_BASE_URL with Headroom's local proxy unless explicitly forced.
-  if (cliType === 'claude' && opts.hasCustomBaseUrl && env.MARVEEN_HEADROOM_WRAP_CUSTOM_URL !== '1') {
+  // When a custom API base URL is injected (e.g. Ollama / OpenRouter / OPENAI_BASE_URL / GEMINI_API_BASE),
+  // avoid overriding the configured endpoint with Headroom's local proxy unless explicitly forced.
+  if (opts.hasCustomBaseUrl && env.MARVEEN_HEADROOM_WRAP_CUSTOM_URL !== '1') {
     return rawCliBin
   }
 
   const provider = providerRegistry.get(cliType)
   let target = provider?.headroomWrapTarget ?? null
+  const supported = probeHeadroomWrapTargets(headroomBin)
+  if (target && !supported.has(target)) {
+    target = null
+  }
   if (!target && cliType === 'agy') {
     if (env.MARVEEN_HEADROOM_WRAP_AGY === '1') {
       target = 'agy'
     } else {
-      const supported = probeHeadroomWrapTargets(headroomBin)
       if (supported.has('agy')) target = 'agy'
       else if (supported.has('antigravity')) target = 'antigravity'
     }

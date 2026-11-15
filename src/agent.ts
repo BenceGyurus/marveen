@@ -199,6 +199,7 @@ export async function runViaNonClaudeCli(
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
     CLAUDE_CODE_DISABLE_AGENT_VIEW: '1',
+    ...(process.getuid?.() === 0 && !process.env.IS_SANDBOX ? { IS_SANDBOX: '1' } : {}),
     ...(opts.env ?? {}),
   }
   delete childEnv.CLAUDE_CODE_OAUTH_TOKEN

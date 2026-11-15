@@ -1811,8 +1811,8 @@ else
   PLUGIN_SHORT="slack-channel"
 fi
 
-if [ -z "$PLUGIN_ID" ]; then
-  :
+if [ -z "$PLUGIN_ID" ] || ! command -v claude >/dev/null 2>&1; then
+  [ -n "$PLUGIN_ID" ] && echo -e "  ${DIM}claude CLI not found -- skipping ${CHANNEL_PROVIDER} Claude plugin (channel-coordinator + MCP active)${NC}"
 else
 echo -e "  ${CHANNEL_PROVIDER} plugin telepites..."
 claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null || true
@@ -1896,6 +1896,9 @@ if [ -d "$SEED_SKILLS_DIR" ]; then
   if [ "$SEED_NEW" -gt 0 ] || [ "$SEED_SKIP" -gt 0 ]; then
     echo -e "  ${GREEN}✓${NC} Seed skills: ${SEED_NEW} new, ${SEED_SKIP} skipped"
   fi
+fi
+if [ -f "$INSTALL_DIR/scripts/lib/main-cli-type.sh" ]; then
+  (. "$INSTALL_DIR/scripts/lib/main-cli-type.sh"; sync_universal_skills_dirs "$SKILLS_DIR")
 fi
 
 # Seed scheduled tasks: from seed-scheduled-tasks/ into ~/.claude/scheduled-tasks/
@@ -2439,6 +2442,9 @@ if { [ "$CHANNEL_PROVIDER" = "telegram" ] || [ "$CHANNEL_PROVIDER" = "discord" ]
   echo -e "  ${DIM}Utana: source ~/.zshrc && ./scripts/start.sh${NC}"
 fi
 PLUGIN_CHECK_PATTERN="${CHANNEL_PROVIDER}"
+if [ "$CHANNEL_PROVIDER" != "gromzo" ] && ! command -v claude >/dev/null 2>&1; then
+  ok "Non-Claude orchestrator / claude CLI absent -- channel-coordinator + MCP active"
+else
 if [ "$CHANNEL_PROVIDER" = "gromzo" ]; then
   ok "Gromzo: a csatorna-plugint a Bridge Gromzo-lepese ellenorzi"
 elif ! claude plugin list 2>/dev/null | grep -q "$PLUGIN_CHECK_PATTERN"; then
@@ -2447,6 +2453,7 @@ elif ! claude plugin list 2>/dev/null | grep -q "$PLUGIN_CHECK_PATTERN"; then
   echo -e "  ${DIM}Utana: ./scripts/stop.sh && ./scripts/start.sh${NC}"
 else
   echo -e "  ${GREEN}✓${NC} ${CHANNEL_PROVIDER} plugin ellenorizve"
+fi
 fi
 
 # Channel pairing flow (Telegram only; Slack uses OAuth / App install)

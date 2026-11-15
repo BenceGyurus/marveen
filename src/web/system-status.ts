@@ -18,7 +18,8 @@ import { promisify } from 'node:util'
 import { PROJECT_ROOT, STORE_DIR, MAIN_AGENT_ID, APP_TZ } from '../config.js'
 import { readEnvFile } from '../env.js'
 import { getDb, getDbFileSizeMb } from '../db.js'
-import { resolveFromPath } from '../platform.js'
+import { tryResolveFromPath } from '../platform.js'
+import { resolveCliBinary } from '../cli-detector.js'
 import {
   projectsDirFor,
   readActiveModelFromProjectDir,
@@ -508,10 +509,25 @@ export function liveBlockSpecs(now = Date.now()): BlockSpec[] {
       title: 'RENDSZER',
       rows: [
         {
-          label: 'Claude Code', source: 'claude --version',
+          label: 'CLI verziók', source: 'claude / codex / agy --version',
           collect: async () => {
-            const { stdout } = await execFileAsync(resolveFromPath('claude'), ['--version'], { timeout: 10_000 })
-            return stdout.trim().split('\n')[0]
+            const entries: Array<[string, string | null]> = [
+              ['Claude', tryResolveFromPath('claude')],
+              ['Codex', resolveCliBinary('codex')],
+              ['Antigravity', resolveCliBinary('agy')],
+            ]
+            const found: string[] = []
+            for (const [name, bin] of entries) {
+              if (!bin) continue
+              try {
+                const { stdout } = await execFileAsync(bin, ['--version'], { timeout: 10_000 })
+                const ver = stdout.trim().split('\n')[0] || 'telepítve'
+                found.push(`${name}: ${ver}`)
+              } catch {
+                found.push(`${name}: telepítve`)
+              }
+            }
+            return found.length ? found.join(' · ') : 'nincs CLI telepítve'
           },
         },
         {
