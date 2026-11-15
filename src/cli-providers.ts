@@ -844,8 +844,9 @@ export function parseAgyModelsOutput(stdout: string): CliModelEntry[] {
     })
   }
   for (const rawLine of stdout.split('\n')) {
-    // Strip carriage-return spinner frames if stdout came from a PTY
-    const line = rawLine.includes('\r') ? rawLine.split('\r').filter(Boolean).pop() ?? '' : rawLine
+    // Strip carriage-return spinner frames and ANSI sequences if stdout came from a PTY
+    const noAnsi = rawLine.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+    const line = noAnsi.includes('\r') ? noAnsi.split('\r').filter(Boolean).pop() ?? '' : noAnsi
     const tabMatch = /^\s*([a-zA-Z0-9][a-zA-Z0-9._:-]*)(?:\t+|\s{2,})(.+?)\s*$/.exec(line)
     if (tabMatch && !/^fetching\b/i.test(tabMatch[1]!)) {
       add(tabMatch[1]!, tabMatch[2]!)
@@ -918,7 +919,7 @@ export function getAgyAvailableModels(
           if (!agyBin) return ''
           return execFileSync(agyBin, ['models'], {
             encoding: 'utf-8',
-            timeout: 5000,
+            timeout: 15000,
             stdio: ['ignore', 'pipe', 'ignore'],
           })
         })()
@@ -944,7 +945,7 @@ export function getAgyAvailableModels(
     }
   } catch { /* ignore */ }
 
-  if (isDefault) {
+  if (isDefault && parsed.length > 0) {
     cachedAgyModels = { at: now, value: parsed }
   }
   return parsed

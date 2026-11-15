@@ -255,9 +255,30 @@ describe('Dashboard UI Channel Inputs & Installer CLI/Model Detection Contracts'
         env: { ...process.env, HOME: fakeHome, PATH: `${fakeBin}:${process.env.PATH}` },
         encoding: 'utf-8',
       })
-      expect(agyOut.trim().split('\n')).toContain('agy:gemini-3-ultra')
-      expect(agyOut.trim().split('\n')).toContain('agy:claude-opus-4-6-thinking')
-      expect(agyOut.trim().split('\n')).toContain('agy:gemini-3-pro-high')
+      const agyLines = agyOut.trim().split('\n')
+      expect(agyLines).toContain('agy:gemini-3-ultra')
+      expect(agyLines).toContain('agy:claude-opus-4-6-thinking')
+      expect(agyLines).toContain('agy:gemini-3-pro-high')
+      // When live agy models succeeds, stale fallbacks are not appended
+      expect(agyLines).not.toContain('agy:gpt-oss-120b-medium')
+
+      // Realistic agy models output with spinner/ANSI/tab columns (gemini-4)
+      writeFileSync(mockAgy, '#!/bin/sh\nprintf "\\r\\033[2Kgemini-4-hydrogen-medium\\tGemini 4 Hydrogen (Medium)\\n"\nprintf "gemini-4-argon-high\\tGemini 4 Argon (High)\\n"\n')
+      chmodSync(mockAgy, 0o755)
+      rmSync(join(fakeHome, '.gemini', 'antigravity-cli', 'settings.json'))
+      const liveOut = execFileSync('bash', ['-c', runner, '--', 'agy'], {
+        env: { ...process.env, HOME: fakeHome, PATH: `${fakeBin}:${process.env.PATH}` },
+        encoding: 'utf-8',
+      }).trim().split('\n')
+      expect(liveOut).toEqual(['agy:gemini-4-hydrogen-medium', 'agy:gemini-4-argon-high'])
+
+      // Fallback when agy binary is unavailable uses current models (no stale gemini-3-pro-high)
+      const fallbackOut = execFileSync('bash', ['-c', runner, '--', 'agy'], {
+        env: { ...process.env, HOME: fakeHome, PATH: '/usr/bin:/bin' },
+        encoding: 'utf-8',
+      }).trim().split('\n')
+      expect(fallbackOut).toContain('agy:gemini-4-hydrogen-medium')
+      expect(fallbackOut).not.toContain('agy:gemini-3-pro-high')
     } finally {
       rmSync(fakeHome, { recursive: true, force: true })
     }

@@ -646,7 +646,7 @@ _detect_cli_status() {
       return 1
       ;;
     agy)
-      if command -v agy &>/dev/null || [ -x "$HOME/.antigravity/antigravity/bin/agy" ]; then return 0; fi
+      if command -v agy &>/dev/null || [ -x "$HOME/.local/bin/agy" ] || [ -x "/opt/homebrew/bin/agy" ] || [ -x "$HOME/.antigravity/antigravity/bin/agy" ] || [ -x "/Applications/Antigravity.app/Contents/Resources/app/bin/agy" ]; then return 0; fi
       return 1
       ;;
   esac
@@ -705,8 +705,9 @@ if cli == 'codex':
                     add_model(item, 'codex')
         except Exception:
             pass
-    for fallback in ('gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.1-codex-max', 'o3', 'o4-mini'):
-        add_model(fallback, 'codex')
+    if not models:
+        for fallback in ('gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.1-codex-max', 'o3', 'o4-mini'):
+            add_model(fallback, 'codex')
 elif cli == 'agy':
     agy_settings = os.path.join(home, '.gemini', 'antigravity-cli', 'settings.json')
     if os.path.isfile(agy_settings):
@@ -717,24 +718,56 @@ elif cli == 'agy':
                 add_model(s['model'], 'agy')
         except Exception:
             pass
-    agy_bin = shutil.which('agy') or (os.path.join(home, '.antigravity', 'antigravity', 'bin', 'agy') if os.path.isfile(os.path.join(home, '.antigravity', 'antigravity', 'bin', 'agy')) else None)
+    agy_candidates = [
+        shutil.which('agy'),
+        os.path.join(home, '.local', 'bin', 'agy'),
+        os.path.join(home, '.antigravity', 'antigravity', 'bin', 'agy'),
+        '/opt/homebrew/bin/agy',
+        '/usr/local/bin/agy',
+        '/Applications/Antigravity.app/Contents/Resources/app/bin/agy',
+    ]
+    agy_bin = next((p for p in agy_candidates if p and os.path.isfile(p) and os.access(p, os.X_OK)), None)
     if agy_bin:
         try:
-            out = subprocess.check_output([agy_bin, 'models'], stderr=subprocess.DEVNULL, timeout=5, text=True)
-            for line in out.splitlines():
-                line = line.strip()
-                if not line or line.lower().startswith(('available', 'model', '---', 'name')):
+            env = os.environ.copy()
+            env['PATH'] = os.path.dirname(agy_bin) + ':' + env.get('PATH', '')
+            proc = subprocess.run([agy_bin, 'models'], capture_output=True, timeout=15, text=True, env=env)
+            out = proc.stdout or ''
+            ansi_re = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+            for line in out.replace('\r', '\n').splitlines():
+                line = ansi_re.sub('', line).strip()
+                if not line or line.lower().startswith(('fetching', 'available', 'model', '---', 'name')):
+                    continue
+                m_tab = re.match(r'^([A-Za-z0-9][A-Za-z0-9._:-]*)(?:\t+|\s{2,})(.+?)\s*$', line)
+                if m_tab:
+                    add_model(m_tab.group(1), 'agy')
+                    continue
+                m_bullet = re.match(r'^[•*\-]\s+(.+?)\s+\(([A-Za-z0-9._:-]+)\)\s*$', line)
+                if m_bullet:
+                    add_model(m_bullet.group(2), 'agy')
                     continue
                 tok = re.split(r'\s+', line)[0].strip('*-•:')
                 if tok:
                     add_model(tok, 'agy')
         except Exception:
             pass
-    for fallback in ('gemini-3-pro-high', 'gemini-3-pro-low', 'gemini-3-flash', 'claude-opus-4-6-thinking', 'claude-sonnet-4-6', 'gpt-oss-120b-medium'):
-        add_model(fallback, 'agy')
+    if not models:
+        for fallback in (
+            'gemini-4-hydrogen-medium',
+            'gemini-4-hydrogen-high',
+            'gemini-4-hydrogen-low',
+            'gemini-4-argon-medium',
+            'gemini-4-argon-high',
+            'gemini-3.8-flash-high',
+            'claude-opus-5-5-medium',
+            'claude-sonnet-5-5-medium',
+            'gpt-oss-120b-medium',
+        ):
+            add_model(fallback, 'agy')
 else:
-    for fallback in ('claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'):
-        add_model(fallback, 'claude')
+    if not models:
+        for fallback in ('claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'):
+            add_model(fallback, 'claude')
 
 for m in models:
     print(m)
@@ -813,7 +846,7 @@ if [ -z "$ORCH_DEFAULT_MODEL" ]; then
   if [ "${#_discovered_models[@]}" -eq 0 ]; then
     case "$ORCH_CLI" in
       codex) _discovered_models=("codex:gpt-5.4") ;;
-      agy)   _discovered_models=("agy:gemini-3-pro-high") ;;
+      agy)   _discovered_models=("agy:gemini-4-hydrogen-medium") ;;
       *)     _discovered_models=("claude-sonnet-4-6" "claude-opus-4-6") ;;
     esac
   fi
@@ -876,9 +909,9 @@ elif ! command -v claude &>/dev/null; then
     ORCH_CLI="codex"
     ORCH_DEFAULT_MODEL="${ORCH_DEFAULT_MODEL:-codex:gpt-5.4}"
     echo -e "  ${GREEN}✓${NC} Codex CLI automatikusan kivalasztva orchestratorkent ($ORCH_DEFAULT_MODEL)"
-  elif [ -x "$HOME/.antigravity/antigravity/bin/agy" ] || command -v agy &>/dev/null; then
+  elif [ -x "$HOME/.local/bin/agy" ] || [ -x "/opt/homebrew/bin/agy" ] || [ -x "$HOME/.antigravity/antigravity/bin/agy" ] || [ -x "/Applications/Antigravity.app/Contents/Resources/app/bin/agy" ] || command -v agy &>/dev/null; then
     ORCH_CLI="agy"
-    ORCH_DEFAULT_MODEL="${ORCH_DEFAULT_MODEL:-agy:gemini-3-pro-high}"
+    ORCH_DEFAULT_MODEL="${ORCH_DEFAULT_MODEL:-agy:gemini-4-hydrogen-medium}"
     echo -e "  ${GREEN}✓${NC} Antigravity (agy) automatikusan kivalasztva orchestratorkent ($ORCH_DEFAULT_MODEL)"
   else
     # A javasolt parancs KULON, masolhato sorban -- egy workshop-resztvevo
