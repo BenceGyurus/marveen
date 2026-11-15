@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { readEnvFile } from '../env.js'
 import { PROJECT_ROOT } from '../config.js'
+import { readInstructionFile } from '../cli-detector.js'
 
 export type AgentTextLang = 'hu' | 'en'
 
@@ -33,7 +34,9 @@ export function approvalTextLang(read: (keys: string[]) => Record<string, string
 export function renderedEnglish(root: string = PROJECT_ROOT): boolean {
   try {
     if (!existsSync(join(root, 'templates', 'en', 'CLAUDE.md.template'))) return false
-    return readFileSync(join(root, 'CLAUDE.md'), 'utf-8').split('\n').some((l) => l.replace(/\r$/, '') === '## Inter-agent communication')
+    const text = readInstructionFile(root, '')
+    if (!text) return false
+    return text.split('\n').some((l) => l.replace(/\r$/, '') === '## Inter-agent communication')
   } catch {
     return false
   }

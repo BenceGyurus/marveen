@@ -252,11 +252,24 @@ resolve_cli_bin() {
 }
 
 prepare_alt_cli_workspace() {
-  local _dir="$1" _cli="$2"
+  local _dir="$1" _cli="$2" _src=""
   [ -d "$_dir" ] || return 0
-  if [ -e "$INSTALL_DIR/CLAUDE.md" ]; then
-    ln -sf "$INSTALL_DIR/CLAUDE.md" "$_dir/AGENTS.md" 2>/dev/null || true
-    ln -sf "$INSTALL_DIR/CLAUDE.md" "$_dir/GEMINI.md" 2>/dev/null || true
+  if [ -f "$INSTALL_DIR/scripts/lib/persona-template.sh" ] && [ "$_dir" = "$INSTALL_DIR" ]; then
+    (. "$INSTALL_DIR/scripts/lib/persona-template.sh"; sync_universal_instruction_files "$_dir")
+  fi
+  if [ -f "$_dir/AGENTS.md" ] && [ ! -L "$_dir/AGENTS.md" ]; then
+    _src="$_dir/AGENTS.md"
+  elif [ -f "$_dir/CLAUDE.md" ] && [ ! -L "$_dir/CLAUDE.md" ]; then
+    _src="$_dir/CLAUDE.md"
+  elif [ -e "$INSTALL_DIR/AGENTS.md" ] && [ ! -L "$INSTALL_DIR/AGENTS.md" ]; then
+    _src="$INSTALL_DIR/AGENTS.md"
+  elif [ -e "$INSTALL_DIR/CLAUDE.md" ] && [ ! -L "$INSTALL_DIR/CLAUDE.md" ]; then
+    _src="$INSTALL_DIR/CLAUDE.md"
+  fi
+  if [ -n "$_src" ]; then
+    [ -e "$_dir/AGENTS.md" ] || ln -sf "$_src" "$_dir/AGENTS.md" 2>/dev/null || true
+    [ -e "$_dir/GEMINI.md" ] || ln -sf "$_src" "$_dir/GEMINI.md" 2>/dev/null || true
+    [ -e "$_dir/CLAUDE.md" ] || ln -sf "$_src" "$_dir/CLAUDE.md" 2>/dev/null || true
   fi
   if command -v node >/dev/null 2>&1 && [ -f "$INSTALL_DIR/dist/cli-detector.js" ]; then
     node -e "import(process.argv[1]).then(m=>m.prepareWorkspaceForCli(process.argv[2], process.argv[3]))" "$INSTALL_DIR/dist/cli-detector.js" "$_dir" "$_cli" 2>/dev/null || true
@@ -2163,7 +2176,13 @@ while [ "$i" -lt "$_boot_guard_s" ]; do
         # files cannot bring them back. Restoring them needs a separate, more
         # invasive change (a stable fallback dir + a seeded ~/.claude.json project
         # entry); see the PR description / card 7EB18437.
-        [ -e "$INSTALL_DIR/CLAUDE.md" ] && ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
+        if [ -e "$INSTALL_DIR/AGENTS.md" ]; then
+          ln -sf "$INSTALL_DIR/AGENTS.md" "$_CHANNELS_STARTDIR/AGENTS.md" 2>/dev/null || true
+          ln -sf "$INSTALL_DIR/AGENTS.md" "$_CHANNELS_STARTDIR/GEMINI.md" 2>/dev/null || true
+          ln -sf "$INSTALL_DIR/AGENTS.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
+        elif [ -e "$INSTALL_DIR/CLAUDE.md" ]; then
+          ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
+        fi
         if [ "$MAIN_CLI_TYPE" = "claude" ]; then
           env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
             "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${AUTH_POST_ENV}${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}${CHANNELS_ARG}"

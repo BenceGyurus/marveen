@@ -68,14 +68,15 @@ OWNER_NAME="$(env_val OWNER_NAME)"; BOT_NAME="$(env_val BOT_NAME)"; AGENT_ID="$(
 # the refresh at the end of the seeding).
 . scripts/lib/seed-refresh.sh || { say "scripts/lib/seed-refresh.sh is missing: the image is broken"; exit 1; }
 persona() { if [ -f scripts/lib/persona-template.sh ]; then (. scripts/lib/persona-template.sh; persona_template "$INSTALL_DIR" "$1" decide); else printf '%s' "templates/$1"; fi; }
-if [ ! -f CLAUDE.md ] && [ -f templates/CLAUDE.md.template ]; then
+if [ ! -f AGENTS.md ] && [ ! -f CLAUDE.md ] && [ -f templates/CLAUDE.md.template ]; then
   TZV="$(. scripts/lib/install-tz.sh; z="$(install_tz "$INSTALL_DIR")"; printf '%s' "${z:-UTC}")"
   # PERSONARENDERLITERAL1108: the shared literal render, through a temp file (CLAUDE.md is never left empty)
   MAIN_AGENT_ID="$AGENT_ID" RENDER_CHAT_ID=0 RENDER_TIMEZONE="$TZV" render_persona_file "$(persona CLAUDE.md.template)" CLAUDE.md \
     || { say "CLAUDE.md could not be rendered from its template; nothing was written"; exit 1; }
-  say "CLAUDE.md written"
+  say "AGENTS.md written"
 fi
-if [ ! -f SOUL.md ] && [ -f templates/SOUL.md.template ]; then
+[ -f scripts/lib/persona-template.sh ] && (. scripts/lib/persona-template.sh; sync_universal_instruction_files "$INSTALL_DIR" promote-claudemd)
+if [ ! -s SOUL.md ] && [ -f templates/SOUL.md.template ]; then
   render_persona_file "$(persona SOUL.md.template)" SOUL.md \
     || { say "SOUL.md could not be rendered from its template; nothing was written"; exit 1; }
   say "SOUL.md written"

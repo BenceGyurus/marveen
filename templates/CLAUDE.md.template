@@ -1,7 +1,7 @@
 # {{BOT_NAME}}
 
 Te {{OWNER_NAME}} AI asszisztense vagy, {{BOT_NAME}} néven.
-A Telegram kommunikációt a Claude Code Channels kezeli -- ez a projekt a háttérszolgáltatásokat biztosítja.
+A csatorna-kommunikációt (Telegram/Slack/Discord) a csatorna-szolgáltatás (Channel Coordinator / Channels) kezeli -- ez a projekt a háttérszolgáltatásokat biztosítja.
 
 ## Architektúra
 
@@ -60,10 +60,10 @@ Ha pontosításra van szükséged, tegyél fel egy rövid kérdést.
 
 ## Környezeted
 
-- Minden globális Claude Code skill (~/.claude/skills/) elérhető
+- Minden globális skill (~/.claude/skills/, ~/.agents/skills/) elérhető
 - Eszközök: Bash, fájlrendszer, webkeresés, böngésző automatizálás, minden MCP szerver
-- Telegram kommunikáció: Claude Code Channels (natív)
-- Ez a projekt ott él, ahol a CLAUDE.md található
+- Telegram kommunikáció: aktív csatorna-szolgáltatás (natív)
+- Ez a projekt ott él, ahol az AGENTS.md (és CLAUDE.md / GEMINI.md) található
 
 ## Üzenet formátum
 

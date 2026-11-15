@@ -173,18 +173,19 @@ async function main() {
   writeEnvFileFresh(envPath, envContent)
   ok('.env fajl letrehozva (0600)')
 
-  // CLAUDE.md szerkesztes
-  header('5. CLAUDE.md testreszabas')
+  // AGENTS.md / CLAUDE.md szerkesztes
+  const instFile = existsSync(join(PROJECT_ROOT, 'AGENTS.md')) ? 'AGENTS.md' : 'CLAUDE.md'
+  header(`5. ${instFile} testreszabas`)
   const editor = process.env.EDITOR ?? 'nano'
-  console.log(`Megnyitom a CLAUDE.md fajlt szerkesztesre (${editor})...`)
+  console.log(`Megnyitom a ${instFile} fajlt szerkesztesre (${editor})...`)
   console.log('Csereld ki a [NAGYBETUS] helyorzokat a sajat adataiddal.\n')
 
   const editNow = await ask('Szerkeszted most? (i/n):')
   if (editNow.toLowerCase() === 'i' || editNow.toLowerCase() === 'igen') {
-    spawnSync(editor, [join(PROJECT_ROOT, 'CLAUDE.md')], { stdio: 'inherit' })
-    ok('CLAUDE.md szerkesztve')
+    spawnSync(editor, [join(PROJECT_ROOT, instFile)], { stdio: 'inherit' })
+    ok(`${instFile} szerkesztve`)
   } else {
-    warn('CLAUDE.md kesobb is szerkesztheto')
+    warn(`${instFile} kesobb is szerkesztheto`)
   }
 
   // Hatterszolgaltatas

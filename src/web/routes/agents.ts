@@ -23,7 +23,17 @@ import { snapshotPersonaFile, writePersonaFileIfUnchanged } from '../persona-wri
 import { measureClaudeCliVersion } from '../claude-cli-version.js'
 import { launchableInstallDefault } from '../default-model-guard.js'
 import { claudeSupportForCli, CLAUDE_MODEL_MIN_CLI } from '../../claude-cli-support.js'
-import { getCliTypeForModel, getCodexAvailableModels, getAgyAvailableModels, detectAvailableClis, detectHeadroomInfo, type CliType } from '../../cli-detector.js'
+import {
+  getCliTypeForModel,
+  getCodexAvailableModels,
+  getAgyAvailableModels,
+  detectAvailableClis,
+  detectHeadroomInfo,
+  readInstructionFile,
+  ensureUniversalInstructionFiles,
+  writeUniversalInstructionFile,
+  type CliType,
+} from '../../cli-detector.js'
 import { CHANNEL_PLUGIN_IDS } from '../plugin-ids.js'
 import { getSecret, setSecret, deleteSecret, listSecrets } from '../vault.js'
 import { loadOpenRouterCatalog, fetchAllOpenRouterModels, loadCuratedManual, addCuratedManual, removeCuratedManual } from '../openrouter-models.js'
@@ -727,10 +737,18 @@ export function resolveTranscriptLocation(name: string): { workingDir: string; c
   }
 }
 
+function finalizeCreatedAgentInstructions(name: string, skippedFiles: string[]): void {
+  try {
+    ensureUniversalInstructionFiles(agentDir(name), {
+      promoteExisting: !skippedFiles.includes('CLAUDE.md'),
+    })
+  } catch { /* best-effort universal AGENTS.md / GEMINI.md sync */ }
+}
+
 function getAgentSummary(name: string): AgentSummary {
   const dir = agentDir(name)
   const configRoot = agentConfigRoot(name)
-  const claudeMd = readFileOr(join(configRoot, 'CLAUDE.md'), '')
+  const claudeMd = readInstructionFile(configRoot, '')
   const soulMd = readFileOr(join(dir, 'SOUL.md'), '')
   const tg = readAgentTelegramConfig(name)
   const dc = readAgentDiscordConfig(name)
@@ -826,7 +844,7 @@ function getAgentDetail(name: string): AgentDetail {
   const dir = agentDir(name)
   const configRoot = agentConfigRoot(name)
   const summary = getAgentSummary(name)
-  const claudeMd = readFileOr(join(configRoot, 'CLAUDE.md'), '')
+  const claudeMd = readInstructionFile(configRoot, '')
   const soulMd = readFileOr(join(dir, 'SOUL.md'), '')
   const mcpJson = readFileOr(join(dir, '.mcp.json'), '{}')
 
@@ -1436,6 +1454,9 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
         logger.warn({ err, name }, 'Personality write skipped, and the main-agent notice about it failed')
       }
     }
+
+    // Keep AGENTS.md canonical with GEMINI.md + CLAUDE.md symlinks across all created agents.
+    finalizeCreatedAgentInstructions(name, personaSkipped.map(s => s.file))
 
     // Notifications are deliberately OUTSIDE the try above. They used to sit
     // inside it, after the "Agent created successfully" log, so a failure here
@@ -3141,7 +3162,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       writeAgentMemoryIsolation(name, data.memoryIsolation === true)
     }
     if (data.claudeMd !== undefined) {
-      atomicWriteFileSync(join(configRoot, 'CLAUDE.md'), data.claudeMd)
+      writeUniversalInstructionFile(configRoot, data.claudeMd)
       // A stale dashboard-editor buffer can carry a pre-federation snapshot
       // (or a block from a since-disabled state): reconcile the managed
       // federation section right after the write, not just at boot -- the

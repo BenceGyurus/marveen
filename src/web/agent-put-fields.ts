@@ -18,7 +18,7 @@ export const AGENT_PUT_WRITABLE_FIELDS = [
   'modelProfile', 'customProvider',
 ] as const
 
-// APIAGENTWRITE1104: the fields that change what an agent is told (CLAUDE.md, SOUL.md), what it runs (.mcp.json: a
+// APIAGENTWRITE1104: the fields that change what an agent is told (AGENTS.md / CLAUDE.md, SOUL.md), what it runs (.mcp.json: a
 // server there is a command started at the next launch), where its prompt goes (customProvider), which login or key it
 // runs under (authMode, apiKey, claudePlan) or its memory boundary (memoryIsolation). They need the owner, not the
 // shared access token every sub-agent can read. model and modelProfile stay token-writable (Samu 69185): the id is

@@ -117,7 +117,7 @@ FORCE_REBUILD="${FORCE_REBUILD:-0}"
 for arg in "$@"; do
   case "$arg" in
     --reseed-fleet|--security-reseed) RESEED_FLEET=1 ;;
-    --regen-claudemd) REGEN_CLAUDEMD=1 ;;
+    --regen-claudemd|--regen-agentsmd|--regen-persona) REGEN_CLAUDEMD=1 ;;
     --rebuild) FORCE_REBUILD=1 ;;
   esac
 done
@@ -1547,6 +1547,66 @@ run_seed_refresh() {
   fi
   return 0
 }
+
+# Ensure universal instruction files (AGENTS.md + GEMINI.md/CLAUDE.md symlinks)
+# and SOUL.md exist across the root install and existing sub-agent dirs.
+# Idempotent: migrates legacy CLAUDE.md -> AGENTS.md without clobbering edits,
+# and heals any missing SOUL.md from templates/SOUL.md.template (never overwrites
+# a non-empty SOUL.md).
+_up_env_val() {
+  local raw=""
+  [ -f "$INSTALL_DIR/.env" ] || return 0
+  raw="$(grep -m1 "^$1=" "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
+  raw="${raw#\"}"; raw="${raw%\"}"
+  raw="${raw#\'}"; raw="${raw%\'}"
+  printf '%s' "$raw"
+}
+
+ensure_universal_persona_files() {
+  if [ -f "$INSTALL_DIR/.env" ]; then
+    [ -n "${MAIN_AGENT_ID:-}" ] || MAIN_AGENT_ID="$(_up_env_val MAIN_AGENT_ID)"
+    [ -n "${BOT_NAME:-}" ] || BOT_NAME="$(_up_env_val BOT_NAME)"
+    [ -n "${OWNER_NAME:-}" ] || OWNER_NAME="$(_up_env_val OWNER_NAME)"
+    [ -n "${WEB_PORT:-}" ] || WEB_PORT="$(_up_env_val WEB_PORT)"
+  fi
+  [ -f "$INSTALL_DIR/scripts/lib/seed-refresh.sh" ] && . "$INSTALL_DIR/scripts/lib/seed-refresh.sh" || true
+  if [ -f "$INSTALL_DIR/scripts/lib/persona-template.sh" ]; then
+    (. "$INSTALL_DIR/scripts/lib/persona-template.sh"; sync_universal_instruction_files "$INSTALL_DIR")
+  fi
+  if [ ! -s "$INSTALL_DIR/AGENTS.md" ] && [ -f "$INSTALL_DIR/templates/CLAUDE.md.template" ] && command -v render_persona_file >/dev/null 2>&1; then
+    _ep_chat=""
+    [ -f "$INSTALL_DIR/.env" ] && _ep_chat="$(grep '^CHAT_ID=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+    _ep_tz="$(. "$INSTALL_DIR/scripts/lib/install-tz.sh" 2>/dev/null; z="$(install_tz "$INSTALL_DIR" 2>/dev/null || true)"; printf '%s' "${z:-UTC}")"
+    if RENDER_CHAT_ID="$_ep_chat" RENDER_TIMEZONE="$_ep_tz" \
+      render_persona_file "$(. "$INSTALL_DIR/scripts/lib/persona-template.sh"; persona_template "$INSTALL_DIR" CLAUDE.md.template)" "$INSTALL_DIR/AGENTS.md"; then
+      [ -f "$INSTALL_DIR/scripts/lib/persona-template.sh" ] && (. "$INSTALL_DIR/scripts/lib/persona-template.sh"; sync_universal_instruction_files "$INSTALL_DIR")
+      echo -e "  ${GREEN}✓${NC} AGENTS.md legenerálva (+ GEMINI.md, CLAUDE.md link)"
+    fi
+  fi
+  if [ ! -s "$INSTALL_DIR/SOUL.md" ] && [ -f "$INSTALL_DIR/templates/SOUL.md.template" ] && command -v render_persona_file >/dev/null 2>&1; then
+    if render_persona_file "$(. "$INSTALL_DIR/scripts/lib/persona-template.sh"; persona_template "$INSTALL_DIR" SOUL.md.template)" "$INSTALL_DIR/SOUL.md"; then
+      echo -e "  ${GREEN}✓${NC} SOUL.md legenerálva a sablonból"
+    fi
+  fi
+  if [ -d "$INSTALL_DIR/agents" ]; then
+    for _ad in "$INSTALL_DIR"/agents/*/; do
+      [ -d "$_ad" ] || continue
+      if [ -f "$INSTALL_DIR/scripts/lib/persona-template.sh" ]; then
+        (. "$INSTALL_DIR/scripts/lib/persona-template.sh"; sync_universal_instruction_files "$_ad")
+      fi
+      if [ ! -s "$_ad/SOUL.md" ]; then
+        _aname="$(basename "$_ad")"
+        if [ -f "$INSTALL_DIR/scripts/lib/persona-template.sh" ] && [ "$(. "$INSTALL_DIR/scripts/lib/persona-template.sh"; agent_text_lang "$INSTALL_DIR")" = "en" ]; then
+          printf '# %s - SOUL\n\n## Core character\n\nYou are %s, a dedicated specialist sub-agent working under %s for %s.\n\n## Tone & rules\n\n- Concise, factual, execution-first. Deliver results without narrating intermediate plans.\n- Communicate with %s in their language; keep code and technical docs in English.\n- Never use em dashes or filler clichés.\n' \
+            "$_aname" "$_aname" "${BOT_NAME:-Marveen}" "${OWNER_NAME:-Owner}" "${OWNER_NAME:-Owner}" > "$_ad/SOUL.md" 2>/dev/null || true
+        else
+          printf '# %s - SOUL\n\n## Alap karakter\n\nA neved %s. Dedikált szakértő al-ügynök vagy %s csapatában %s megbízásából.\n\n## Hangnem és szabályok\n\n- Tömör, tárgyilagos, végrehajtás-központú kommunikáció felesleges magyarázkodás nélkül.\n- %s-val magyarul kommunikálsz; kód, kommentek és technikai dokumentáció angolul.\n- Gondolatjel (em dash) és AI klisék használata tilos.\n' \
+            "$_aname" "$_aname" "${BOT_NAME:-Marveen}" "${OWNER_NAME:-Gazda}" "${OWNER_NAME:-Gazda}" > "$_ad/SOUL.md" 2>/dev/null || true
+        fi
+      fi
+    done
+  fi
+}
 # Scheduled-task registry: the schedule runner fires a task only if its
 # files hash-match the dashboard's registry (store/claudeclaw.db). A task dir
 # THIS script creates from the seed is entirely shipped content, so it is
@@ -1637,6 +1697,7 @@ if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
       echo -e "  ${ORANGE}↻${NC} Mar a legfrissebb verzion ($NEW_VERSION), de a dist elavult (built=${BUILT_COMMIT:-none}) -> ongyogyito ujraforditas + restart"
     fi
   elif [ "$RESEED_FLEET" != "1" ] && [ "$REGEN_CLAUDEMD" != "1" ]; then
+    ensure_universal_persona_files
     if [[ "${MARVEEN_LANG:-hu}" == "en" ]]; then
       echo -e "  ${GREEN}✓${NC} Already on the latest version ($NEW_VERSION)"
     else
@@ -1951,29 +2012,45 @@ if [ -d "$SEED_SCHED_DIR" ]; then
   fi
 fi
 
-# --- Main CLAUDE.md identity check / optional regen (fleet-reseed only) ------
+ensure_universal_persona_files
+
+# --- Main instruction identity check / optional regen (fleet-reseed / regen) ---
 # A stale install can carry hardcoded references to agents that do not exist
 # here (the origin fleet's roster baked into an old template). We never know
 # those names statically -- and must not bake them into the shipped updater --
 # so we detect the SYMPTOM generically: inter-agent delegation targets in the
-# main CLAUDE.md that are neither this install's main agent nor a real local
-# sub-agent under agents/. Warn only; the operator decides (or opts into regen).
+# main AGENTS.md/CLAUDE.md that are neither this install's main agent nor a real
+# local sub-agent under agents/. Warn only; the operator decides (or opts into regen).
 if [ "$RESEED_FLEET" = "1" ] || [ "$REGEN_CLAUDEMD" = "1" ]; then
   CLAUDE_MD="$INSTALL_DIR/CLAUDE.md"
+  AGENTS_MD="$INSTALL_DIR/AGENTS.md"
   if [ "$REGEN_CLAUDEMD" = "1" ] && [ -f "$INSTALL_DIR/templates/CLAUDE.md.template" ]; then
     # Opt-in: re-render from the canonical template with this install's identity.
-    # Back up first -- the operator may have hand-edited CLAUDE.md.
-    [ -f "$CLAUDE_MD" ] && cp "$CLAUDE_MD" "$CLAUDE_MD.backup-$(date +%Y%m%d-%H%M%S)"
+    # Back up first -- the operator may have hand-edited AGENTS.md / CLAUDE.md.
+    if [ -f "$INSTALL_DIR/AGENTS.md" ]; then
+      cp "$INSTALL_DIR/AGENTS.md" "$INSTALL_DIR/AGENTS.md.backup-$(date +%Y%m%d-%H%M%S)"
+    elif [ -f "$CLAUDE_MD" ]; then
+      cp "$CLAUDE_MD" "$CLAUDE_MD.backup-$(date +%Y%m%d-%H%M%S)"
+    fi
     REGEN_CHAT_ID=""
     [ -f "$INSTALL_DIR/.env" ] && REGEN_CHAT_ID=$(grep '^CHAT_ID=' "$INSTALL_DIR/.env" | cut -d= -f2-)
-    # PERSONARENDERLITERAL1108: the shared literal render, through a temp file: a failed render keeps CLAUDE.md as it was.
+    # PERSONARENDERLITERAL1108: the shared literal render, through a temp file: a failed render keeps existing files as they were.
     if RENDER_CHAT_ID="$REGEN_CHAT_ID" RENDER_TIMEZONE="$(. "$INSTALL_DIR/scripts/lib/install-tz.sh"; z="$(install_tz "$INSTALL_DIR")"; printf '%s' "${z:-UTC}")" \
       render_persona_file "$(. "$INSTALL_DIR/scripts/lib/persona-template.sh"; persona_template "$INSTALL_DIR" CLAUDE.md.template)" "$CLAUDE_MD"; then
-      echo -e "  ${GREEN}✓${NC} CLAUDE.md újrarenderelve a sablonból (előző verzió mentve: CLAUDE.md.backup-*)"
+      [ -f "$INSTALL_DIR/scripts/lib/persona-template.sh" ] && (. "$INSTALL_DIR/scripts/lib/persona-template.sh"; sync_universal_instruction_files "$INSTALL_DIR" promote-claudemd)
+      echo -e "  ${GREEN}✓${NC} AGENTS.md újrarenderelve a sablonból (+ GEMINI.md, CLAUDE.md link; előző mentve: *.backup-*)"
     else
-      echo -e "  ${RED}HIBA:${NC} a CLAUDE.md nem renderelhető a sablonból; a régi fájl változatlan maradt."
+      echo -e "  ${RED}HIBA:${NC} az AGENTS.md nem renderelhető a sablonból; a régi fájl változatlan maradt."
+    fi
+    if [ -f "$INSTALL_DIR/templates/SOUL.md.template" ]; then
+      [ -f "$INSTALL_DIR/SOUL.md" ] && cp "$INSTALL_DIR/SOUL.md" "$INSTALL_DIR/SOUL.md.backup-$(date +%Y%m%d-%H%M%S)"
+      if render_persona_file "$(. "$INSTALL_DIR/scripts/lib/persona-template.sh"; persona_template "$INSTALL_DIR" SOUL.md.template)" "$INSTALL_DIR/SOUL.md"; then
+        echo -e "  ${GREEN}✓${NC} SOUL.md újrarenderelve a sablonból"
+      fi
     fi
   elif [ -f "$CLAUDE_MD" ]; then
+    _CHECK_MD="$AGENTS_MD"
+    [ -f "$_CHECK_MD" ] || _CHECK_MD="$CLAUDE_MD"
     KNOWN_IDS=" ${MAIN_AGENT_ID} ${BOT_NAME} "
     if [ -d "$INSTALL_DIR/agents" ]; then
       for d in "$INSTALL_DIR"/agents/*/; do
@@ -1988,11 +2065,11 @@ if [ "$RESEED_FLEET" = "1" ] || [ "$REGEN_CLAUDEMD" = "1" ]; then
       case " $UNKNOWN " in *" $tgt "*) continue ;; esac   # dedupe
       UNKNOWN="$UNKNOWN $tgt"
     done <<INNER_EOF
-$(grep -oE '"to"[[:space:]]*:[[:space:]]*"[a-z][a-z0-9_-]*"' "$CLAUDE_MD" 2>/dev/null | sed -E 's/.*"([a-z][a-z0-9_-]*)".*/\1/')
+$(grep -oE '"to"[[:space:]]*:[[:space:]]*"[a-z][a-z0-9_-]*"' "$_CHECK_MD" 2>/dev/null | sed -E 's/.*"([a-z][a-z0-9_-]*)".*/\1/')
 INNER_EOF
     if [ -n "$UNKNOWN" ]; then
-      echo -e "  ${ORANGE}⚠${NC} A fő CLAUDE.md olyan inter-agent címzett(ek)re hivatkozik ami NEM létezik ezen az installon:${UNKNOWN}"
-      echo -e "     Ez tipikusan egy régi sablon maradéka. Tisztítsd kézzel, vagy futtasd: ./update.sh --regen-claudemd"
+      echo -e "  ${ORANGE}⚠${NC} A fő AGENTS.md olyan inter-agent címzett(ek)re hivatkozik ami NEM létezik ezen az installon:${UNKNOWN}"
+      echo -e "     Ez tipikusan egy régi sablon maradéka. Tisztítsd kézzel, vagy futtasd: ./update.sh --regen-persona"
     fi
   fi
 fi

@@ -1,8 +1,18 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { execSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
+import { execSync, spawn } from 'node:child_process'
 import { PROJECT_ROOT } from './config.js'
+import {
+  getCliTypeForModel,
+  resolveCliBinary,
+  resolveConfiguredMainCliType,
+  resolveConfiguredMainModel,
+  stripCliModelPrefix,
+  type CliType,
+} from './cli-detector.js'
 
 const TYPING_REFRESH_MS = 4000
 import { logger } from './logger.js'
@@ -132,6 +142,182 @@ export interface RunAgentOpts {
   // that CACHE or PERSIST the result (capability summaries) must set this:
   // the apology would otherwise be stored as if it were generated content.
   timeoutAsError?: boolean
+  // Optional target model / CLI hint so non-Claude agents and orchestrators
+  // can run headless text generation with their configured runtime.
+  model?: string
+  cliType?: CliType
+}
+
+export interface NonClaudeRunResult {
+  text: string | null
+  error?: string
+}
+
+/**
+ * Execute a one-shot headless prompt via a non-Claude CLI (`codex` or `agy`).
+ * Strips Claude auth env vars and cleans up temporary output files safely.
+ */
+export async function runViaNonClaudeCli(
+  cliType: 'codex' | 'agy',
+  prompt: string,
+  opts: {
+    cwd?: string
+    model?: string
+    timeoutMs?: number
+    env?: Record<string, string | undefined>
+    onTyping?: () => void
+    binPath?: string | null
+  } = {},
+): Promise<NonClaudeRunResult> {
+  const bin = opts.binPath !== undefined ? opts.binPath : resolveCliBinary(cliType)
+  if (!bin) {
+    return { text: null, error: `${cliType} CLI binary not found` }
+  }
+
+  const timeoutMs = opts.timeoutMs ?? AGENT_TIMEOUT_MS
+  const cwd = opts.cwd && existsSync(opts.cwd) ? opts.cwd : PROJECT_ROOT
+  const cleanModel = opts.model ? stripCliModelPrefix(opts.model) : ''
+  const tmpOut = cliType === 'codex' ? join(tmpdir(), `marveen-codex-${randomUUID()}.out`) : null
+
+  const args = cliType === 'codex'
+    ? [
+        'exec',
+        '--skip-git-repo-check',
+        '--sandbox', 'read-only',
+        '--color', 'never',
+        ...(cleanModel ? ['-m', cleanModel] : []),
+        ...(tmpOut ? ['--output-last-message', tmpOut] : []),
+        '-',
+      ]
+    : [
+        '-p', prompt,
+        '--output-format', 'text',
+        '--dangerously-skip-permissions',
+        ...(cleanModel ? ['--model', cleanModel] : []),
+      ]
+
+  const childEnv: Record<string, string | undefined> = {
+    ...process.env,
+    CLAUDE_CODE_DISABLE_AGENT_VIEW: '1',
+    ...(opts.env ?? {}),
+  }
+  delete childEnv.CLAUDE_CODE_OAUTH_TOKEN
+  delete childEnv.ANTHROPIC_API_KEY
+
+  const typingInterval = opts.onTyping ? setInterval(opts.onTyping, TYPING_REFRESH_MS) : undefined
+
+  try {
+    return await new Promise<NonClaudeRunResult>((resolve) => {
+      let stdout = ''
+      let stderr = ''
+      let settled = false
+      let timedOut = false
+
+      const child = spawn(bin, args, {
+        cwd,
+        env: childEnv as NodeJS.ProcessEnv,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+
+      const timer = setTimeout(() => {
+        timedOut = true
+        try { child.kill('SIGKILL') } catch { /* ignore */ }
+      }, timeoutMs)
+
+      child.stdout?.on('data', (chunk: Buffer | string) => {
+        stdout += chunk.toString()
+      })
+      child.stderr?.on('data', (chunk: Buffer | string) => {
+        stderr += chunk.toString()
+      })
+      child.on('error', (err) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve({ text: null, error: `${cliType} spawn error: ${err.message}` })
+      })
+      child.on('close', (code) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (timedOut) {
+          resolve({ text: null, error: `${cliType} timeout after ${Math.round(timeoutMs / 1000)}s` })
+          return
+        }
+        let fileText = ''
+        if (tmpOut && existsSync(tmpOut)) {
+          try { fileText = readFileSync(tmpOut, 'utf-8') } catch { /* ignore */ }
+        }
+        const rawOut = (fileText.trim() ? fileText : stdout).trim()
+        if (code === 0 && rawOut) {
+          resolve({ text: rawOut })
+          return
+        }
+        const detail = (stderr || rawOut || `exit code ${code ?? 'unknown'}`).trim().slice(0, 300)
+        resolve({ text: null, error: `${cliType} exited with ${code}: ${detail}` })
+      })
+
+      if (cliType === 'codex' && child.stdin) {
+        child.stdin.write(prompt)
+      }
+      child.stdin?.end()
+    })
+  } finally {
+    if (typingInterval) clearInterval(typingInterval)
+    if (tmpOut) {
+      try { rmSync(tmpOut, { force: true }) } catch { /* ignore */ }
+    }
+  }
+}
+
+function buildNonClaudeCandidates(opts: RunAgentOpts): Array<{ cli: 'codex' | 'agy'; model?: string }> {
+  const configuredCli = opts.cliType ?? (opts.model ? getCliTypeForModel(opts.model) : resolveConfiguredMainCliType(PROJECT_ROOT))
+  const configuredModel = opts.model || resolveConfiguredMainModel(PROJECT_ROOT)
+  const list: Array<{ cli: 'codex' | 'agy'; model?: string }> = []
+  if (configuredCli === 'agy' || configuredCli === 'codex') {
+    list.push({ cli: configuredCli, model: configuredModel || undefined })
+  }
+  for (const fallbackCli of ['agy', 'codex'] as const) {
+    if (!list.some((c) => c.cli === fallbackCli)) {
+      list.push({ cli: fallbackCli })
+    }
+  }
+  return list
+}
+
+async function tryNonClaudeBackends(
+  prompt: string,
+  cwd: string,
+  env: Record<string, string | undefined> | undefined,
+  opts: RunAgentOpts,
+  onTyping?: () => void,
+  onlyConfigured = false,
+): Promise<{ text: string | null; error?: string; attempted: boolean }> {
+  const configuredCli = opts.cliType ?? (opts.model ? getCliTypeForModel(opts.model) : resolveConfiguredMainCliType(PROJECT_ROOT))
+  const candidates = buildNonClaudeCandidates(opts)
+  const errors: string[] = []
+  let attempted = false
+
+  for (const cand of candidates) {
+    if (onlyConfigured && cand.cli !== configuredCli) continue
+    if (!resolveCliBinary(cand.cli)) continue
+    attempted = true
+    const res = await runViaNonClaudeCli(cand.cli, prompt, {
+      cwd,
+      model: cand.model,
+      timeoutMs: opts.timeoutMs,
+      env,
+      onTyping,
+    })
+    if (res.text) return { text: res.text, attempted: true }
+    if (res.error) errors.push(res.error)
+  }
+
+  return {
+    text: null,
+    error: errors.length ? errors.join(' | ') : undefined,
+    attempted,
+  }
 }
 
 export async function runAgent(
@@ -161,6 +347,22 @@ export async function runAgent(
   // paths; it is idempotent, so the common sender's second pass changes nothing.
   // Only the at-sign step: the SDK takes a multi-line prompt, line breaks stay.
   const prompt = neutralizeAtMentions(message)
+
+  // Non-Claude orchestrator/agent preference: when the active model targets `agy` or `codex`,
+  // run headless generation directly with the configured non-Claude CLI instead of failing on
+  // missing Claude Code binaries/credentials.
+  const preferredCli = opts.cliType ?? (opts.model ? getCliTypeForModel(opts.model) : resolveConfiguredMainCliType(PROJECT_ROOT))
+  if (preferredCli === 'agy' || preferredCli === 'codex') {
+    const nonClaudeRes = await tryNonClaudeBackends(prompt, cwd, env, opts, onTyping, false)
+    if (nonClaudeRes.text) {
+      return { text: nonClaudeRes.text }
+    }
+    if (nonClaudeRes.attempted && !resolveClaudeCodeBin() && !process.env.ANTHROPIC_API_KEY && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+      return { text: null, error: nonClaudeRes.error }
+    }
+  }
+
+  let workerOutcome: { text: string | null; error?: string; authFailed?: boolean } | null = null
   if (agentBackend() === 'worker') {
     // The interactive worker is a single shared session with its own fixed,
     // isolated, NEUTRAL cwd/config -- so the SDK-era per-call cwd/env isolation
@@ -170,13 +372,21 @@ export async function runAgent(
     // and avoids any load-order coupling.
     if (sessionId) logger.warn('runAgent(worker): resume/sessionId not supported on worker backend, ignoring')
     const { runViaWorker } = await import('./web/agent-worker.js')
-    const { text, error, authFailed } = await runViaWorker(prompt, timeoutMs)
+    workerOutcome = await runViaWorker(prompt, timeoutMs)
     // authFailed = the worker could not recover its subscription auth even after
     // a reseed + clear-keychain + restart + retry. Fall through to the SDK path
     // so the call still completes (API billing) instead of dying silently (the
-    // 2026-06-10 bake failure mode). Every other outcome returns as-is.
-    if (!authFailed) return { text, error }
-    logger.error('runAgent: worker auth unrecoverable, falling back to SDK backend for this call (API billing)')
+    // 2026-06-10 bake failure mode). Every other outcome returns as-is unless
+    // Claude is absent/unusable and a non-Claude fallback CLI can handle it.
+    if (!workerOutcome.authFailed) {
+      if (workerOutcome.text !== null) return { text: workerOutcome.text, error: workerOutcome.error }
+      if (preferredCli === 'claude') {
+        const altFallback = await tryNonClaudeBackends(prompt, cwd, env, opts, onTyping, false)
+        if (altFallback.text) return { text: altFallback.text }
+      }
+      return { text: workerOutcome.text, error: workerOutcome.error }
+    }
+    logger.error('runAgent: worker auth unrecoverable, falling back to SDK / non-Claude backend for this call')
   }
   // --- legacy SDK path (rollback: MARVEEN_AGENT_BACKEND=sdk; API billing) ---
   let newSessionId: string | undefined
@@ -236,6 +446,14 @@ export async function runAgent(
         resultText = `A feldolgozas tullepte a ${mins} perces idokorlatot. Probald rovidebben megfogalmazni, vagy bontsd tobb lepesre.`
       }
     } else {
+      // If Claude SDK threw (e.g. Claude binary/auth absent) and Codex/Antigravity is
+      // installed, fall back before throwing.
+      if (preferredCli === 'claude') {
+        const altFallback = await tryNonClaudeBackends(prompt, cwd, env, opts, undefined, false)
+        if (altFallback.text) {
+          return { text: altFallback.text }
+        }
+      }
       logger.error({ err }, 'Agent hiba')
       throw err instanceof Error ? err : new Error(String(err))
     }

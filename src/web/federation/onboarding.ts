@@ -24,8 +24,8 @@
 // comments capped); manifest data (remote agent rosters) must NEVER be
 // rendered into it -- that would put hundreds of lines into every main-agent
 // session context. Tests assert a byte budget.
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { PROJECT_ROOT, MAIN_AGENT_ID, BOT_NAME, WEB_PORT } from '../../config.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
 import { logger } from '../../logger.js'
@@ -337,8 +337,19 @@ function resolveLang(): 'hu' | 'en' {
  *  the reconcile for the rest. `seedPolicy` is main-agent-only. */
 function ensureBlockInFile(path: string, block: string | null, lang: 'hu' | 'en', seedPolicy: boolean): boolean {
   try {
-    if (!existsSync(path)) return false // no persona yet: nothing to onboard
-    const content = readFileSync(path, 'utf-8')
+    const dir = dirname(path)
+    const agentsPath = join(dir, 'AGENTS.md')
+    const targetPath = (() => {
+      try {
+        if (existsSync(agentsPath) && !lstatSync(agentsPath).isSymbolicLink()) return agentsPath
+      } catch { /* ignore */ }
+      try {
+        if (existsSync(path) && lstatSync(path).isSymbolicLink()) return realpathSync(path)
+      } catch { /* ignore */ }
+      return existsSync(path) ? path : existsSync(agentsPath) ? agentsPath : path
+    })()
+    if (!existsSync(targetPath)) return false // no persona yet: nothing to onboard
+    const content = readFileSync(targetPath, 'utf-8')
     let next = applyFederationBlock(content, block)
     let changed = next !== null
     let working = next ?? content
@@ -347,7 +358,7 @@ function ensureBlockInFile(path: string, block: string | null, lang: 'hu' | 'en'
       changed = true
     }
     if (!changed) return false
-    atomicWriteFileSync(path, working)
+    atomicWriteFileSync(targetPath, working)
     return true
   } catch (err) {
     logger.warn({ err, path }, 'federation: CLAUDE.md onboarding ensure skipped for file')

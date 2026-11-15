@@ -1,9 +1,10 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync, rmSync, watchFile, unwatchFile, realpathSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, lstatSync, mkdirSync, copyFileSync, readdirSync, statSync, rmSync, watchFile, unwatchFile, realpathSync } from 'node:fs'
 import { readRemovedDefaultTasks } from './scheduled-tasks-io.js'
 import { registerScheduledTask } from './schedule-registry.js'
 import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, HEARTBEAT_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, WEB_PORT, OWNER_DRIVE_FOLDER, APP_TZ, DASHBOARD_PUBLIC_URL, AGENT_API_ORIGIN, STORE_DIR, mainAgentRecipientLedgerEnabled } from '../config.js'
+import { resolveConfiguredMainCliType } from '../cli-detector.js'
 import { channelStateDir } from '../channel-provider.js'
 import { runAgent } from '../agent.js'
 import { atomicWriteFileSync } from './atomic-write.js'
@@ -3876,6 +3877,28 @@ export function buildEvidenceBody(isMainAgent = false, mainLedger = mainAgentRec
   ].join('\n')
 }
 
+/**
+ * Resolve the canonical instruction file path to read/write for `name`,
+ * preferring universal `AGENTS.md` (when regular file or resolved through a
+ * `CLAUDE.md -> AGENTS.md` symlink) while keeping full backward compatibility
+ * for legacy `CLAUDE.md`-only directories.
+ */
+function resolveScaffoldInstructionPath(name: string, includeMain: boolean): string {
+  const dir = includeMain && name === MAIN_AGENT_ID ? PROJECT_ROOT : agentDir(name)
+  const agentsPath = join(dir, 'AGENTS.md')
+  try {
+    if (existsSync(agentsPath) && !lstatSync(agentsPath).isSymbolicLink()) return agentsPath
+  } catch { /* ignore */ }
+  const claudePath = join(dir, 'CLAUDE.md')
+  if (existsSync(claudePath)) {
+    try {
+      if (lstatSync(claudePath).isSymbolicLink()) return realpathSync(claudePath)
+    } catch { /* ignore */ }
+    return claudePath
+  }
+  return existsSync(agentsPath) ? agentsPath : claudePath
+}
+
 // Idempotently ensures the evidence-rule block is present and current in the
 // agent's CLAUDE.md. Called on every startAgentProcess() alongside
 // ensureAutonomySection(), so existing agents pick it up on respawn.
@@ -3883,9 +3906,7 @@ export function buildEvidenceBody(isMainAgent = false, mainLedger = mainAgentRec
 // Idempotency contract mirrors ensureFleetRosterSection (five rules apply).
 export function ensureEvidenceSection(name: string): void {
   // The main agent's CLAUDE.md lives at PROJECT_ROOT, not inside agents/<name>/.
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   const block = `${EVIDENCE_BEGIN}\n${buildEvidenceBody(name === MAIN_AGENT_ID)}\n${EVIDENCE_END}`
@@ -3916,9 +3937,7 @@ export function ensureEvidenceSection(name: string): void {
 // Idempotency contract mirrors ensureFleetRosterSection (five rules apply).
 export function ensureMcpListChannelSection(name: string): void {
   // The main agent's CLAUDE.md lives at PROJECT_ROOT, not inside agents/<name>/.
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   const block = `${MCPLIST_BEGIN}\n${buildMcpListChannelBody()}\n${MCPLIST_END}`
@@ -3999,9 +4018,7 @@ export function buildMessageCloseBody(helper = true, name: string = MAIN_AGENT_I
 // agent's CLAUDE.md; same contract as ensureMcpListChannelSection, called from
 // the same two surfaces (web.ts for the main agent, agent-process.ts for the rest).
 export function ensureMessageCloseSection(name: string): void {
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   const block = `${MSGCLOSE_BEGIN}\n${buildMessageCloseBody(agentUsesApiHelper(name), name)}\n${MSGCLOSE_END}`
@@ -4061,9 +4078,7 @@ export function buildBackgroundCheckpointBody(): string {
 // from the same two surfaces (web.ts for the main agent, agent-process.ts for
 // the rest), so an agent carries it from its next start on.
 export function ensureBackgroundCheckpointSection(name: string): void {
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   const block = `${BGCHECKPOINT_BEGIN}\n${buildBackgroundCheckpointBody()}\n${BGCHECKPOINT_END}`
@@ -4117,9 +4132,7 @@ export function buildPaneAtEscapeBody(): string {
 // agent's CLAUDE.md; same contract as ensureMessageCloseSection, called from
 // the same two surfaces (web.ts for the main agent, agent-process.ts for the rest).
 export function ensurePaneAtEscapeSection(name: string): void {
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   const block = `${PANEATESC_BEGIN}\n${buildPaneAtEscapeBody()}\n${PANEATESC_END}`
@@ -4148,9 +4161,7 @@ export function ensurePaneAtEscapeSection(name: string): void {
 export function ensureAutonomySection(name: string): void {
   // The main agent's CLAUDE.md lives at PROJECT_ROOT, not inside agents/<name>/.
   // Sub-agents use agentDir(name)/CLAUDE.md as usual.
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   const body = buildAutonomyBody(name, agentUsesApiHelper(name), agentRunsStrict(name))
@@ -4188,7 +4199,7 @@ export function ensureAutonomySection(name: string): void {
 //   5. Any write             → goes through atomicWriteFileSync to avoid a
 //      torn file if the process is killed mid-write.
 export function ensureFleetRosterSection(name: string): void {
-  const claudeMdPath = join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, false)
   if (!existsSync(claudeMdPath)) return
 
   const body = buildFleetRosterBody(name)
@@ -4220,7 +4231,7 @@ export function ensureFleetRosterSection(name: string): void {
 // Returns true when the file changed, so the caller can log which agents were
 // re-anchored and from which foreign roots.
 export function ensureProjectRootInClaudeMd(name: string): boolean {
-  const claudeMdPath = join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, false)
   if (!existsSync(claudeMdPath)) return false
   let existing: string
   try {
@@ -4381,9 +4392,7 @@ export function buildSkillsPathTrapBody(name: string): string {
 // ensureAutonomySection; called on every startAgentProcess() so existing
 // agents receive the warning automatically on respawn.
 export function ensureSkillsPathTrapSection(name: string): void {
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   const block = `${SKILLS_TRAP_BEGIN}\n${buildSkillsPathTrapBody(name)}\n${SKILLS_TRAP_END}`
@@ -4482,7 +4491,7 @@ export function preQuarantineSwitchSection(section: string): string {
 // (the pull request description says how the owner updates it).
 export function ensureSkillSectionCurrent(name: string, retiredPath?: string): boolean {
   if (name === MAIN_AGENT_ID) return false
-  const claudeMdPath = join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, false)
   if (!existsSync(claudeMdPath)) return false
   let existing: string
   try {
@@ -4564,9 +4573,7 @@ export function buildSystemDirectiveAuthBody(name: string, helper = true): strin
 // Same five-rule idempotency contract as ensureFleetRosterSection /
 // ensureAutonomySection / ensureSkillsPathTrapSection.
 export function ensureSystemDirectiveAuthSection(name: string): void {
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   const block = `${SYSTEM_DIRECTIVE_AUTH_BEGIN}\n${buildSystemDirectiveAuthBody(name, agentUsesApiHelper(name))}\n${SYSTEM_DIRECTIVE_AUTH_END}`
@@ -4651,9 +4658,7 @@ export function buildAgentIdHeaderBody(name: string, helper = true): string {
 
 // Same five-rule idempotency contract as ensureSystemDirectiveAuthSection.
 export function ensureAgentIdHeaderSection(name: string): void {
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   const block = `${AGENT_ID_HEADER_BEGIN}\n${buildAgentIdHeaderBody(name, agentUsesApiHelper(name))}\n${AGENT_ID_HEADER_END}`
@@ -4918,9 +4923,7 @@ function buildThinChiefBody(name: string): string {
 // Same five-rule idempotency contract as ensureSkillsPathTrapSection; called on
 // every startAgentProcess() so a respawn re-asserts the standard.
 export function ensureThinChiefHandoffSection(name: string): void {
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   const block = `${THIN_CHIEF_BEGIN}\n${buildThinChiefBody(name)}\n${THIN_CHIEF_END}`
@@ -5034,9 +5037,7 @@ export function buildMemorySearchLabelBody(name: string, helper = true): string 
 // plus the one extra rule above: do not append where the file already documents
 // the label inline.
 export function ensureMemorySearchLabelSection(name: string): void {
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   let existing: string
@@ -5135,9 +5136,7 @@ export function buildFleetAuthBody(): string {
 // One-directional, like there -- once the marker block is in a file it is
 // refreshed in place forever, so a wording fix still reaches every agent.
 export function ensureFleetAuthSection(name: string): void {
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   let existing: string
@@ -5258,9 +5257,7 @@ export function buildApiHelperBody(name: string): string {
 export function ensureApiHelperSection(name: string): void {
   // The main agent too (Samu 65192, Marveen 65196): ONLY as this marker block in the root CLAUDE.md, like its other
   // generated sections; the owner's body text around it is never touched.
-  const claudeMdPath = name === MAIN_AGENT_ID
-    ? join(PROJECT_ROOT, 'CLAUDE.md')
-    : join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, true)
   if (!existsSync(claudeMdPath)) return
 
   let existing: string
@@ -5290,7 +5287,7 @@ export function ensureApiHelperSection(name: string): void {
 export function ensureStrictApiSection(name: string): void {
   // The main agent has no security profile, so it is never strict.
   if (name === MAIN_AGENT_ID) return
-  const claudeMdPath = join(agentDir(name), 'CLAUDE.md')
+  const claudeMdPath = resolveScaffoldInstructionPath(name, false)
   if (!existsSync(claudeMdPath)) return
 
   let existing: string
@@ -5629,13 +5626,23 @@ Output ONLY the markdown content, no code fences.`
 // chasing the wrong thread when the actual cause was an unauthenticated Claude
 // Code CLI on the host. Always surface the diagnostic command sequence.
 function noOutputHint(target: string): string {
+  const cli = resolveConfiguredMainCliType(PROJECT_ROOT)
+  if (cli === 'agy') {
+    return (
+      `Failed to generate ${target}: the Antigravity CLI (\`agy\`) returned no output. ` +
+      `Verify with \`agy --version\` and test headless execution with \`agy -p "ping"\`.`
+    )
+  }
+  if (cli === 'codex') {
+    return (
+      `Failed to generate ${target}: the Codex CLI (\`codex\`) returned no output. ` +
+      `Verify authentication with \`codex --version\` and test headless execution with \`codex exec "ping"\`.`
+    )
+  }
   return (
-    `Failed to generate ${target}: the Claude Code CLI returned no output. ` +
-    `Most likely cause: the CLI on this host is not authenticated. ` +
-    `Verify with: \`claude --version\`, then \`claude /login\` (or set ` +
-    `ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN). ` +
-    `If that succeeds and the error persists, run \`claude --print "ping"\` ` +
-    `from this directory to confirm headless invocation works.`
+    `Failed to generate ${target}: the active agent CLI returned no output. ` +
+    `If using Claude Code, verify with \`claude --version\` and \`claude /login\` (or set ` +
+    `ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN); if using Antigravity/Codex, ensure \`agy\` or \`codex\` is installed and logged in.`
   )
 }
 

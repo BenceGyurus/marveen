@@ -45,11 +45,11 @@ describe('evidence-rule scaffold block', () => {
     expect(fn.slice(0, 1200)).toContain('atomicWriteFileSync')
   })
 
-  it('resolves the main agent CLAUDE.md at PROJECT_ROOT, sub-agents under agentDir', () => {
+  it('resolves the main agent instruction file at PROJECT_ROOT, sub-agents under agentDir', () => {
     const fn = SCAFFOLD.slice(SCAFFOLD.indexOf('export function ensureEvidenceSection('))
-    expect(fn.slice(0, 800)).toContain('name === MAIN_AGENT_ID')
-    expect(fn.slice(0, 800)).toContain("join(PROJECT_ROOT, 'CLAUDE.md')")
-    expect(fn.slice(0, 800)).toContain("join(agentDir(name), 'CLAUDE.md')")
+    expect(fn.slice(0, 800)).toContain('resolveScaffoldInstructionPath(name, true)')
+    const helper = SCAFFOLD.slice(SCAFFOLD.indexOf('function resolveScaffoldInstructionPath('), SCAFFOLD.indexOf('function ensureScaffoldBlock('))
+    expect(helper).toContain('name === MAIN_AGENT_ID ? PROJECT_ROOT : agentDir(name)')
   })
 
   it('returns without writing when the computed block is unchanged', () => {

@@ -41,7 +41,11 @@ _atl_read() {
 # template's heading. Without this it would turn Hungarian on the next regen (Samu 72862). A Hungarian CLAUDE.md, or
 # one without the heading, stays hu. src/web/agent-text-lang.ts renderedEnglish() is the same rule.
 _atl_rendered_en() {
-  [ -f "$1/CLAUDE.md" ] && grep -qx '## Inter-agent communication' "$1/CLAUDE.md" && [ -f "$1/templates/en/CLAUDE.md.template" ]
+  [ -f "$1/templates/en/CLAUDE.md.template" ] || return 1
+  if [ -f "$1/AGENTS.md" ] && grep -qx '## Inter-agent communication' "$1/AGENTS.md"; then
+    return 0
+  fi
+  [ -f "$1/CLAUDE.md" ] && grep -qx '## Inter-agent communication' "$1/CLAUDE.md"
 }
 
 agent_text_lang() {
@@ -55,7 +59,7 @@ agent_text_lang_decide() {
   local dir="$1" v lang
   v="$(_atl_read "$dir")"
   if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
-  if [ -f "$dir/CLAUDE.md" ]; then
+  if [ -f "$dir/AGENTS.md" ] || [ -f "$dir/CLAUDE.md" ]; then
     # An existing install: hu, unless it was rendered English; that one gets its key now, so it stays English.
     if _atl_rendered_en "$dir"; then
       [ -s "$dir/.env" ] && [ -n "$(tail -c1 "$dir/.env")" ] && printf '\n' >> "$dir/.env"
@@ -84,5 +88,41 @@ persona_template() {
     printf '%s' "$dir/templates/en/$name"
   else
     printf '%s' "$dir/templates/$name"
+  fi
+}
+
+# Sync universal cross-agent instruction files inside $1 (<dir>):
+# Keep AGENTS.md as the canonical regular file (used by Codex, Antigravity,
+# OpenCode, etc.) and link GEMINI.md + CLAUDE.md -> AGENTS.md so every CLI and
+# internal reader sees the exact same file without drift.
+# Pass "promote-claudemd" as $2 right after rendering into CLAUDE.md so the
+# freshly rendered regular file becomes AGENTS.md cleanly.
+sync_universal_instruction_files() {
+  local dir="$1" mode="${2:-}" agents claude gemini
+  [ -d "$dir" ] || return 0
+  agents="$dir/AGENTS.md"
+  claude="$dir/CLAUDE.md"
+  gemini="$dir/GEMINI.md"
+
+  if [ "$mode" = "promote-claudemd" ] && [ -f "$claude" ] && [ ! -L "$claude" ]; then
+    [ -L "$agents" ] && rm -f "$agents"
+    mv -f "$claude" "$agents"
+  elif [ ! -f "$agents" ] || [ -L "$agents" ]; then
+    if [ -f "$claude" ] && [ ! -L "$claude" ]; then
+      [ -L "$agents" ] && rm -f "$agents"
+      mv -f "$claude" "$agents"
+    elif [ -f "$gemini" ] && [ ! -L "$gemini" ]; then
+      [ -L "$agents" ] && rm -f "$agents"
+      mv -f "$gemini" "$agents"
+    fi
+  fi
+
+  if [ -f "$agents" ] && [ ! -L "$agents" ]; then
+    if [ ! -e "$claude" ] || [ -L "$claude" ]; then
+      ln -sf "AGENTS.md" "$claude"
+    fi
+    if [ ! -e "$gemini" ] || [ -L "$gemini" ]; then
+      ln -sf "AGENTS.md" "$gemini"
+    fi
   fi
 }

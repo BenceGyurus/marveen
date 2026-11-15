@@ -21,7 +21,7 @@ import { configDirFor } from '../main-transcript-root.js'
 import type { RouteContext } from './types.js'
 import { logger } from '../../logger.js'
 import { reportNonColourSetting } from '../../css-color.js'
-import { getCliTypeForModel, detectAvailableClis, prepareWorkspaceForCli } from '../../cli-detector.js'
+import { getCliTypeForModel, detectAvailableClis, prepareWorkspaceForCli, readInstructionFile } from '../../cli-detector.js'
 import { isValidModelId } from '../../model-id.js'
 import { updateEnvFile } from '../../env.js'
 
@@ -76,7 +76,7 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
   const { req, res, path, method } = ctx
 
   if (path === '/api/marveen' && method === 'GET') {
-    const claudeMd = readFileOr(join(PROJECT_ROOT, 'CLAUDE.md'), '')
+    const claudeMd = readInstructionFile(PROJECT_ROOT, '')
     const soulMd = readFileOr(join(PROJECT_ROOT, 'SOUL.md'), '')
     const mcpJson = readFileOr(join(PROJECT_ROOT, '.mcp.json'), '')
     const soulSection = claudeMd.match(/## Személyiség\n\n([\s\S]*?)(?=\n## )/)?.[1]?.trim()

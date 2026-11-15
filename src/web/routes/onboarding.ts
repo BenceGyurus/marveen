@@ -22,6 +22,7 @@ import { isManagedSettingsReady, getManagedSettingsSudoCommand } from './agents.
 import { mayActAsOwner, mayActAsOwnerOrFirstRun, refuseOwner, OWNER_SESSION_REQUIRED } from './auth.js'
 import { assertEnvEntry } from '../../env.js'
 import { mainGromzoPrimaryReady } from '../main-gromzo-launch.js'
+import { resolveInstructionFilePath } from '../../cli-detector.js'
 import type { RouteContext } from './types.js'
 
 const execFileAsync = promisify(execFile)
@@ -428,7 +429,9 @@ export async function tryHandleOnboarding(ctx: RouteContext): Promise<boolean> {
     // Persona files: the agent introduces itself by this name. Never touches
     // owner/access config, only the two persona documents.
     try {
-      for (const f of [join(PROJECT_ROOT, 'CLAUDE.md'), join(PROJECT_ROOT, 'SOUL.md')]) {
+      const instructionTarget = resolveInstructionFilePath(PROJECT_ROOT)
+      for (const f of new Set([instructionTarget, join(PROJECT_ROOT, 'CLAUDE.md'), join(PROJECT_ROOT, 'SOUL.md')])) {
+        if (!existsSync(f)) continue
         renameInPersonaFile(f, prevAgentName, agentName)
         if (prevOwnerName) renameInPersonaFile(f, prevOwnerName, ownerName)
       }

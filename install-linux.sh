@@ -2150,23 +2150,24 @@ esac
 [ -f "$INSTALL_DIR/scripts/lib/seed-refresh.sh" ] && . "$INSTALL_DIR/scripts/lib/seed-refresh.sh"
 command -v render_persona_file >/dev/null 2>&1 || fail "scripts/lib/seed-refresh.sh is missing: the install tree is incomplete"
 
-# CLAUDE.md generalasa template-bol
+# Univerzalis AGENTS.md generalasa template-bol + GEMINI.md / CLAUDE.md szinkron (minden agent CLI-hez)
 if [ -f "$INSTALL_DIR/templates/CLAUDE.md.template" ]; then
   # PERSONARENDERLITERAL1108: the shared literal render, through a temp file (the target is never truncated)
   RENDER_CHAT_ID="$CHAT_ID" RENDER_TIMEZONE="$(. "$INSTALL_DIR/scripts/lib/install-tz.sh"; z="$(install_tz "$INSTALL_DIR")"; printf '%s' "${z:-UTC}")" \
-    render_persona_file "$(. "$INSTALL_DIR/scripts/lib/persona-template.sh"; persona_template "$INSTALL_DIR" CLAUDE.md.template decide)" "$INSTALL_DIR/CLAUDE.md" \
-    || fail "CLAUDE.md could not be rendered from its template; nothing was written"
-  ok "CLAUDE.md generalva"
+    render_persona_file "$(. "$INSTALL_DIR/scripts/lib/persona-template.sh"; persona_template "$INSTALL_DIR" CLAUDE.md.template decide)" "$INSTALL_DIR/AGENTS.md" \
+    || fail "AGENTS.md could not be rendered from its template; nothing was written"
+  [ -f "$INSTALL_DIR/scripts/lib/persona-template.sh" ] && (. "$INSTALL_DIR/scripts/lib/persona-template.sh"; sync_universal_instruction_files "$INSTALL_DIR")
+  ok "AGENTS.md generalva (+ GEMINI.md, CLAUDE.md link)"
 else
-  warn "CLAUDE.md.template nem talalhato, CLAUDE.md nem generalhato"
+  warn "CLAUDE.md.template nem talalhato, AGENTS.md nem generalhato"
 fi
 
 # SOUL.md generalasa template-bol (personality definition for the main agent).
-if [ -f "$INSTALL_DIR/templates/SOUL.md.template" ] && [ ! -f "$INSTALL_DIR/SOUL.md" ]; then
+if [ -f "$INSTALL_DIR/templates/SOUL.md.template" ] && [ ! -s "$INSTALL_DIR/SOUL.md" ]; then
   render_persona_file "$(. "$INSTALL_DIR/scripts/lib/persona-template.sh"; persona_template "$INSTALL_DIR" SOUL.md.template decide)" "$INSTALL_DIR/SOUL.md" \
     || fail "SOUL.md could not be rendered from its template; nothing was written"
   ok "SOUL.md generalva"
-elif [ ! -f "$INSTALL_DIR/templates/SOUL.md.template" ] && [ ! -f "$INSTALL_DIR/SOUL.md" ]; then
+elif [ ! -f "$INSTALL_DIR/templates/SOUL.md.template" ] && [ ! -s "$INSTALL_DIR/SOUL.md" ]; then
   warn "SOUL.md.template nem talalhato, SOUL.md nem generalhato"
 fi
 
