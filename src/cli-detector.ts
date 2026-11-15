@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, symlinkSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import { parseEnvContent } from './env-parse.js'
 import {
   SAFE_MODEL_ID_RX,
   getCliProvider,
@@ -191,4 +192,36 @@ export function prepareWorkspaceForCli(dir: string, cliType: CliType): void {
 
   provider.stampWorkspaceTrust(dir)
   syncCliMcpConfig(cliType, join(dir, '.mcp.json'))
+}
+
+/**
+ * Resolve the configured CLI runtime for the main orchestrator session
+ * (`claude`, `codex`, `agy`, etc.) from `<projectRoot>/.env` (`MAIN_AGENT_MODEL`),
+ * `process.env.MAIN_AGENT_MODEL`, or `<projectRoot>/.claude/settings.json`.
+ * Defaults to `'claude'` when no non-Claude model is configured.
+ */
+export function resolveConfiguredMainCliType(projectRoot: string): CliType {
+  try {
+    const envPath = join(projectRoot, '.env')
+    if (existsSync(envPath)) {
+      const parsed = parseEnvContent(readFileSync(envPath, 'utf-8'), ['MAIN_AGENT_MODEL'])
+      const fromEnv = parsed.MAIN_AGENT_MODEL?.trim()
+      if (fromEnv) return getCliTypeForModel(fromEnv)
+    }
+  } catch { /* ignore */ }
+
+  const procModel = process.env.MAIN_AGENT_MODEL?.trim()
+  if (procModel) return getCliTypeForModel(procModel)
+
+  try {
+    const settingsPath = join(projectRoot, '.claude', 'settings.json')
+    if (existsSync(settingsPath)) {
+      const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8')) as { model?: unknown }
+      if (typeof parsed?.model === 'string' && parsed.model.trim()) {
+        return getCliTypeForModel(parsed.model.trim())
+      }
+    }
+  } catch { /* ignore */ }
+
+  return 'claude'
 }

@@ -2417,6 +2417,17 @@ if [ -x "$INSTALL_DIR/scripts/install-main-inbox-observer.sh" ]; then
   fi
 fi
 
+# Telegram channel coordinator: silent backfill for Claude native plugin AND primary
+# inbound poller for non-Claude orchestrators (codex / agy).
+if [ "$CHANNEL_PROVIDER" = "telegram" ] && [ -n "${BOT_TOKEN:-}" ] && [ -x "$INSTALL_DIR/scripts/install-channel-coordinator.sh" ]; then
+  if "$INSTALL_DIR/scripts/install-channel-coordinator.sh" --load >/dev/null 2>&1; then
+    ok "Channel coordinator telepitve (Telegram backfill / codex+agy inbound)"
+  else
+    warn "A channel coordinator NEM FUT (telepites vagy elso futas nem igazolt)"
+    note_helper_down install-channel-coordinator
+  fi
+fi
+
 # Verify channel plugin is working
 sleep 3
 echo ""

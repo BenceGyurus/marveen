@@ -52,15 +52,25 @@ fi
 mkdir -p "$COORD_STATE_DIR"
 chmod 700 "$COORD_STATE_DIR"
 if [ ! -f "$COORD_STATE_DIR/.env" ]; then
-  TOKEN="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$PROJECT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+  TOKEN=""
+  for _cand in \
+    "$PROJECT_DIR/.env" \
+    "$PROJECT_DIR/store/.claude-channels/telegram/.env" \
+    "$PROJECT_DIR/store/.channels/telegram/.env" \
+    "$PROJECT_DIR/.claude/channels/telegram/.env" \
+    "$HOME/.claude/channels/telegram/.env"; do
+    [ -f "$_cand" ] || continue
+    TOKEN="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$_cand" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "\"' \r" || true)"
+    [ -n "$TOKEN" ] && break
+  done
   if [ -z "$TOKEN" ]; then
-    echo "ERROR: TELEGRAM_BOT_TOKEN not found in $PROJECT_DIR/.env" >&2
+    echo "ERROR: TELEGRAM_BOT_TOKEN not found in $PROJECT_DIR/.env or channel state dirs" >&2
     exit 1
   fi
   umask 077
   printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TOKEN" > "$COORD_STATE_DIR/.env"
   chmod 600 "$COORD_STATE_DIR/.env"
-  unset TOKEN
+  unset TOKEN _cand
   echo "Wrote coordinator token to $COORD_STATE_DIR/.env (0600)"
 else
   echo "Coordinator .env already present, leaving as-is: $COORD_STATE_DIR/.env"

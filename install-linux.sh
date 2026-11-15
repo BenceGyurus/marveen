@@ -2771,6 +2771,7 @@ NODE_PATH="$(which node)"
 # the unit name and the session name are independent.
 DASH_UNIT="${SERVICE_ID}-dashboard"
 CHAN_UNIT="${SERVICE_ID}-channels"
+COORD_UNIT="${SERVICE_ID}-channel-coordinator"
 MORN_UNIT="${SERVICE_ID}-morning"
 KEEPALIVE_UNIT="${SERVICE_ID}-channel-keepalive-probe"
 INBOX_OBSERVER_UNIT="${SERVICE_ID}-main-inbox-observer"
@@ -2870,6 +2871,32 @@ Environment=HOME=$HOME
 Environment=USER=$USER
 Environment=TERM=xterm-256color
 Environment=LANG=${LANG:-en_US.UTF-8}
+${TZ_LINE}
+
+[Install]
+WantedBy=default.target
+EOF
+
+# ${COORD_UNIT}.service (Telegram inbound coordinator: primary for codex/agy, silent backfill for claude)
+cat >"$SYSTEMD_DIR/${COORD_UNIT}.service" <<EOF
+[Unit]
+Description=${BOT_NAME} Channel Coordinator (telegram)
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=$INSTALL_DIR
+ExecStartPre=$INSTALL_DIR/scripts/ensure-native-modules.sh
+ExecStart=$NODE_PATH $INSTALL_DIR/dist/channel-coordinator.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:$INSTALL_DIR/store/channel-coordinator.log
+StandardError=append:$INSTALL_DIR/store/channel-coordinator.error.log
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=$HOME
+Environment=USER=$USER
 ${TZ_LINE}
 
 [Install]
@@ -3102,11 +3129,17 @@ if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; the
   # ${MORN_UNIT}.timer is deliberately NOT in this list -- the seeded
   # reggeli-napindito scheduled task already delivers the morning briefing at
   # 07:30 from inside the live channel session. See the timer's comment above.
-  if systemctl --user enable "${DASH_UNIT}" "${CHAN_UNIT}" "${KEEPALIVE_UNIT}.timer" "${INBOX_OBSERVER_UNIT}.timer" "${SERVICE_ID}-host-watchdog.service" 2>/dev/null; then
+  _ENABLE_UNITS=("${DASH_UNIT}" "${CHAN_UNIT}" "${KEEPALIVE_UNIT}.timer" "${INBOX_OBSERVER_UNIT}.timer" "${SERVICE_ID}-host-watchdog.service")
+  _START_UNITS=("${DASH_UNIT}" "${CHAN_UNIT}")
+  if [ "$CHANNEL_PROVIDER" = "telegram" ] && [ -n "${BOT_TOKEN:-}" ]; then
+    _ENABLE_UNITS+=("${COORD_UNIT}.service")
+    _START_UNITS+=("${COORD_UNIT}")
+  fi
+  if systemctl --user enable "${_ENABLE_UNITS[@]}" 2>/dev/null; then
     ok "systemd unitok generalva es engedelyezve"
   else
     warn "A unit-fajlok elkeszultek, de az engedelyezesuk nem sikerult -- ujrainditas utan a szolgaltatasok nem indulnak el maguktol."
-    # ALL FOUR units the enable above covers, not just the two services. A
+    # ALL units the enable above covers, not just the two services. A
     # command that silently drops the keepalive probe or the watchdog would leave
     # them disabled while the operator sees no error and believes the fix worked
     # -- an incomplete instruction ends the same way as a false claim.
@@ -3119,12 +3152,11 @@ if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; the
     # install-macos.sh, where the label is already on its own line.
     echo -e "  ${DIM}Javitas most:${NC}"
     echo -e "  ${DIM}systemctl --user enable \\${NC}"
-    echo -e "  ${DIM}    ${DASH_UNIT} ${CHAN_UNIT} \\${NC}"
-    echo -e "  ${DIM}    ${KEEPALIVE_UNIT}.timer ${INBOX_OBSERVER_UNIT}.timer ${SERVICE_ID}-host-watchdog.service${NC}"
+    echo -e "  ${DIM}    ${_ENABLE_UNITS[*]}${NC}"
   fi
-  systemctl --user start "${DASH_UNIT}" "${CHAN_UNIT}" 2>/dev/null || true
+  systemctl --user start "${_START_UNITS[@]}" 2>/dev/null || true
   sleep 2
-  for svc in "${DASH_UNIT}" "${CHAN_UNIT}"; do
+  for svc in "${_START_UNITS[@]}"; do
     if systemctl --user is-active --quiet "$svc" 2>/dev/null; then
       ok "$svc fut"
     else
@@ -3133,7 +3165,7 @@ if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; the
       SVCFAIL=1
     fi
   done
-  [ "$SVCFAIL" -eq 0 ] && ok "Mindket szolgaltatas fut"
+  [ "$SVCFAIL" -eq 0 ] && ok "Mindegyik szolgaltatas fut"
   # TIMERSTART1011: `enable` alone does not start a timer. Both timers fire on
   # OnBootSec=90s, which on a host that has been up for a while has already
   # passed, so without a start they stay inactive until the next reboot. The
@@ -3175,6 +3207,14 @@ else
   else
     echo -e "  ${RED}✗${NC} Channels nem indult el -- log: $INSTALL_DIR/store/channels.log"
     SVCFAIL=1
+  fi
+  if [ "$CHANNEL_PROVIDER" = "telegram" ] && [ -n "${BOT_TOKEN:-}" ]; then
+    if kill -0 "$(cat "$INSTALL_DIR/store/channel-coordinator.pid" 2>/dev/null)" 2>/dev/null; then
+      ok "Channel coordinator fut (nohup, pid $(cat "$INSTALL_DIR/store/channel-coordinator.pid"))"
+    else
+      echo -e "  ${RED}✗${NC} Channel coordinator nem indult el -- log: $INSTALL_DIR/store/channel-coordinator.log"
+      SVCFAIL=1
+    fi
   fi
   echo -e "  ${DIM}Ujrainditas kesobb: ./scripts/start.sh${NC}"
   if [ "$IS_WSL" = "true" ]; then

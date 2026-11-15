@@ -34,6 +34,8 @@ import { execFile, execFileSync } from 'node:child_process'
 import { logger } from './logger.js'
 import { isSettingOn } from './setting-flag.js'
 import { PROJECT_ROOT, MAIN_AGENT_ID, CHANNEL_PROVIDER, BOT_NAME } from './config.js'
+import { parseEnvContent } from './env-parse.js'
+import { resolveConfiguredMainCliType } from './cli-detector.js'
 import { getUpdates, probeHighWater, mapUpdate, TelegramApiError } from './channel-coordinator/telegram-client.js'
 import { probeNativeChannelDown } from './channel-coordinator/liveness.js'
 import {
@@ -114,26 +116,124 @@ export function inNative409Cooldown(confirmedUpUntilMs: number, nowMs: number): 
 // ---- token --------------------------------------------------------------
 
 // Read the bot token from the coordinator's own STATE_DIR/.env (chmod 0600),
-// falling back to the process env for local dev. NEVER log the token.
-function readToken(): string {
-  const fromEnv = process.env['TELEGRAM_BOT_TOKEN']
-  if (fromEnv) return fromEnv
-  const envPath = join(STATE_DIR, '.env')
+// Resolve the bot token across process env, coordinator STATE_DIR/.env,
+// TELEGRAM_STATE_DIR/.env, install-scoped/local channel state dirs, ~/.claude/channels/telegram/.env,
+// and PROJECT_ROOT/.env (needed on Linux and non-Claude setups). NEVER log the token.
+function readEnvKeyFromFile(filePath: string, key: string): string | null {
   try {
-    const content = readFileSync(envPath, 'utf-8')
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim()
-      if (!trimmed || trimmed.startsWith('#')) continue
-      const eq = trimmed.indexOf('=')
-      if (eq === -1) continue
-      if (trimmed.slice(0, eq).trim() === 'TELEGRAM_BOT_TOKEN') {
-        let v = trimmed.slice(eq + 1).trim()
-        if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1)
-        return v
+    const parsed = parseEnvContent(readFileSync(filePath, 'utf-8'), [key])
+    const val = parsed[key]?.trim()
+    return val || null
+  } catch {
+    return null
+  }
+}
+
+export function candidateTelegramStateDirs(opts: {
+  projectRoot?: string
+  homeDir?: string
+  env?: NodeJS.ProcessEnv
+} = {}): string[] {
+  const projectRoot = opts.projectRoot ?? PROJECT_ROOT
+  const homeDir = opts.homeDir ?? homedir()
+  const env = opts.env ?? process.env
+  const dirs: string[] = []
+  const explicit = (env['TELEGRAM_STATE_DIR'] ?? readEnvKeyFromFile(join(projectRoot, '.env'), 'TELEGRAM_STATE_DIR') ?? '').trim()
+  if (explicit) dirs.push(explicit)
+  dirs.push(join(projectRoot, 'store', '.claude-channels', 'telegram'))
+  dirs.push(join(projectRoot, 'store', '.channels', 'telegram'))
+  dirs.push(join(projectRoot, '.claude', 'channels', 'telegram'))
+  dirs.push(join(homeDir, '.claude', 'channels', 'telegram'))
+  return [...new Set(dirs)]
+}
+
+export function resolveCoordinatorTelegramToken(opts: {
+  stateDir?: string
+  projectRoot?: string
+  homeDir?: string
+  env?: NodeJS.ProcessEnv
+} = {}): string {
+  const env = opts.env ?? process.env
+  const fromEnv = env['TELEGRAM_BOT_TOKEN']?.trim()
+  if (fromEnv) return fromEnv
+  const stateDir = opts.stateDir ?? STATE_DIR
+  const projectRoot = opts.projectRoot ?? PROJECT_ROOT
+  const homeDir = opts.homeDir ?? homedir()
+  const candidates = [
+    join(stateDir, '.env'),
+    ...candidateTelegramStateDirs({ projectRoot, homeDir, env }).map((d) => join(d, '.env')),
+    join(projectRoot, '.env'),
+  ]
+  const uniquePaths = [...new Set(candidates)]
+  for (const envPath of uniquePaths) {
+    const val = readEnvKeyFromFile(envPath, 'TELEGRAM_BOT_TOKEN')
+    if (val) return val
+  }
+  throw new Error(`TELEGRAM_BOT_TOKEN not found (checked env + ${uniquePaths.join(', ')})`)
+}
+
+function readToken(): string {
+  return resolveCoordinatorTelegramToken()
+}
+
+export interface TelegramAccessPolicy {
+  enforced: boolean
+  allowedIds: Set<string>
+}
+
+export function loadTelegramAccessPolicy(opts: {
+  projectRoot?: string
+  homeDir?: string
+  env?: NodeJS.ProcessEnv
+} = {}): TelegramAccessPolicy {
+  const projectRoot = opts.projectRoot ?? PROJECT_ROOT
+  const env = opts.env ?? process.env
+  const allowedIds = new Set<string>()
+  let hasAccessFile = false
+
+  for (const dir of candidateTelegramStateDirs({ projectRoot, homeDir: opts.homeDir, env })) {
+    const accessPath = join(dir, 'access.json')
+    if (!existsSync(accessPath)) continue
+    try {
+      const parsed = JSON.parse(readFileSync(accessPath, 'utf-8')) as Record<string, unknown>
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        hasAccessFile = true
+        if (Array.isArray(parsed['allowFrom'])) {
+          for (const x of parsed['allowFrom']) {
+            const s = String(x).trim()
+            if (s) allowedIds.add(s)
+          }
+        }
+        const groups = parsed['groups']
+        if (groups && typeof groups === 'object' && !Array.isArray(groups)) {
+          for (const k of Object.keys(groups)) {
+            const s = k.trim()
+            if (s) allowedIds.add(s)
+          }
+        }
       }
-    }
-  } catch { /* no .env -- fall through to error */ }
-  throw new Error(`TELEGRAM_BOT_TOKEN not found (checked env + ${envPath})`)
+    } catch { /* ignore malformed access.json */ }
+  }
+
+  const allowedChatEnv = (env['ALLOWED_CHAT_ID'] ?? readEnvKeyFromFile(join(projectRoot, '.env'), 'ALLOWED_CHAT_ID') ?? '').trim()
+  if (allowedChatEnv && allowedChatEnv !== '0') {
+    allowedIds.add(allowedChatEnv)
+  }
+
+  return {
+    enforced: hasAccessFile || allowedIds.size > 0,
+    allowedIds,
+  }
+}
+
+export function isTelegramEventAuthorized(
+  ev: { chat_id: number | null; user_id: number | null },
+  policy: TelegramAccessPolicy,
+): boolean {
+  if (!policy.enforced) return true
+  if (ev.chat_id != null && policy.allowedIds.has(String(ev.chat_id))) return true
+  if (ev.user_id != null && policy.allowedIds.has(String(ev.user_id))) return true
+  return false
 }
 
 // ---- single-instance lock ------------------------------------------------
@@ -349,12 +449,23 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 // fails, the batch stops there: the failed update and everything after it are
 // NOT covered by the offset, so Telegram redelivers them on the next
 // getUpdates. Dedup on update_id makes that redelivery safe.
-export function processBatch(updates: { update_id: number }[]): { offset: number | null; stalled: boolean } {
+export function processBatch(
+  updates: { update_id: number }[],
+  policy: TelegramAccessPolicy = loadTelegramAccessPolicy(),
+): { offset: number | null; stalled: boolean } {
   let durable: number | null = null
   for (const raw of updates) {
     const ev = mapUpdate(raw as Parameters<typeof mapUpdate>[0])
     if (!ev) {
       // unhandled update kind: offset still advances past it
+      durable = durable == null ? raw.update_id : Math.max(durable, raw.update_id)
+      continue
+    }
+    if (!isTelegramEventAuthorized(ev, policy)) {
+      logger.warn(
+        { update_id: ev.update_id, chat_id: ev.chat_id, user_id: ev.user_id, username: ev.username },
+        'channel-coordinator: dropping unauthorized Telegram update (not in allowFrom/groups/ALLOWED_CHAT_ID)',
+      )
       durable = durable == null ? raw.update_id : Math.max(durable, raw.update_id)
       continue
     }
@@ -467,14 +578,21 @@ async function runLoop(token: string): Promise<void> {
       downStreak = down ? downStreak + 1 : 0
       if (downStreak >= DOWN_DEBOUNCE) {
         try {
-          // Seed poll_offset to the current high-water so we only deliver
-          // messages that arrive DURING the outage; the detection-window
-          // backlog (<= hw) is left for the native to deliver on recovery.
-          const hw = await probeHighWater(token)
-          if (hw != null) setOffset(SOURCE, hw)
+          const nativeSupported = resolveConfiguredMainCliType(PROJECT_ROOT) === 'claude' && PROVIDER !== 'gromzo'
+          if (nativeSupported) {
+            // Seed poll_offset to the current high-water so we only deliver
+            // messages that arrive DURING the outage; the detection-window
+            // backlog (<= hw) is left for the native to deliver on recovery.
+            const hw = await probeHighWater(token)
+            if (hw != null) setOffset(SOURCE, hw)
+            logger.warn({ session: SESSION, seededHighWater: hw }, 'channel-coordinator: native channel DOWN, entering BACKFILLING')
+          } else {
+            // Codex / Antigravity / non-native orchestrators have no native plugin poller:
+            // preserve stored poll_offset (or 0 on first boot) so no inbound messages are skipped.
+            logger.warn({ session: SESSION, storedOffset: getOffset(SOURCE) }, 'channel-coordinator: native poller N/A, entering primary Telegram polling')
+          }
           state = 'backfilling'
           transientAttempt = 0
-          logger.warn({ session: SESSION, seededHighWater: hw }, 'channel-coordinator: native channel DOWN, entering BACKFILLING')
         } catch (err) {
           if (err instanceof TelegramApiError && err.kind === 'fatal') { await fatalExit(err) }
           // A 409 on the seed means the native is in fact polling -> stay idle

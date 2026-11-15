@@ -33,6 +33,7 @@ function candidateStateDirs(projectRoot) {
   if (explicit) out.push(explicit)
   out.push(join(projectRoot, 'store', '.claude-channels', 'telegram'))
   out.push(join(projectRoot, 'store', '.channels', 'telegram'))
+  out.push(join(projectRoot, '.claude', 'channels', 'telegram'))
   out.push(join(home, '.claude', 'channels', 'telegram'))
   return out
 }

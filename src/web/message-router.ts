@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { logger } from '../logger.js'
-import { MAIN_AGENT_ID, VOICE_TRANSCRIBE_INBOUND, APP_TZ } from '../config.js'
+import { MAIN_AGENT_ID, PROJECT_ROOT, VOICE_TRANSCRIBE_INBOUND, APP_TZ } from '../config.js'
+import { resolveConfiguredMainCliType } from '../cli-detector.js'
+import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { formatBacklogTimestamp } from './backlog-timestamp.js'
 import { resolveAgentChannelStateDir } from './voice-directive.js'
 import {
@@ -848,7 +850,8 @@ export async function runMessageRouterTick(): Promise<void> {
         logger.info({ agent }, 'message-router: delivery hold released')
       }
     }
-    const pending = selectTickWindow(localPending, MAX_MESSAGES_PER_TICK, MAIN_AGENT_ID)
+    const mainAgentUsesPull = resolveConfiguredMainCliType(PROJECT_ROOT) === 'claude'
+    const pending = selectTickWindow(localPending, MAX_MESSAGES_PER_TICK, MAIN_AGENT_ID, { mainAgentPull: mainAgentUsesPull })
     // ---- update absent/present tracking for all receivers in this tick ----
     // Rebuild the stuck-detector's view of which agents are absent RIGHT NOW.
     // Shared across all messages to the same agent (one sessionExistsOnHost call
@@ -859,7 +862,9 @@ export async function runMessageRouterTick(): Promise<void> {
       // Pull-delivery receivers are excluded on purpose: they have no session
       // here, so probing for one would only feed the absent/stuck trackers a
       // permanent "absent" and invite a reconnect batch that can never fire.
-      if (m.to_agent !== MAIN_AGENT_ID && !readAgentPullDelivery(m.to_agent)) receiversInTick.add(m.to_agent)
+      // When MAIN_AGENT runs on a non-Claude CLI (codex/agy), there is no
+      // UserPromptSubmit drain hook, so route MAIN_AGENT via direct tmux injection.
+      if ((m.to_agent !== MAIN_AGENT_ID || !mainAgentUsesPull) && !readAgentPullDelivery(m.to_agent)) receiversInTick.add(m.to_agent)
     }
     const absentNow = new Set<string>()
     const presentNow = new Set<string>()
@@ -872,13 +877,14 @@ export async function runMessageRouterTick(): Promise<void> {
     // is classified from the same session list the spawns would have returned.
     withTmuxBatch(() => {
       for (const agent of receiversInTick) {
-        const host = readAgentRemoteHost(agent)
-        const session = agentSessionName(agent)
+        const isMain = agent === MAIN_AGENT_ID
+        const host = isMain ? null : readAgentRemoteHost(agent)
+        const session = isMain ? MAIN_CHANNELS_SESSION : agentSessionName(agent)
         const exists = sessionExistsOnHost(host, session)
         // Read once per receiver per tick, not once per message: the flag decides
         // the whole delivery path below and a per-message read would re-open the
         // same config file for every queued item.
-        agentSessionCache.set(agent, { host, session, exists, worksource: readAgentWorksourceChannel(agent) })
+        agentSessionCache.set(agent, { host, session, exists, worksource: isMain ? false : readAgentWorksourceChannel(agent) })
         if (exists) {
           presentNow.add(agent)
         } else {
@@ -980,7 +986,7 @@ export async function runMessageRouterTick(): Promise<void> {
       // The watcher does the same job correctly (double-capture-confirmed idle,
       // abort-on-busy send, stale-spell escalation, owner alert, hourly budget),
       // so the router simply leaves the row for the PULL path to claim.
-      if (isMainAgent) continue
+      if (isMainAgent && mainAgentUsesPull) continue
 
       // PULL-delivery agents (own machine, own scoped token, no session here)
       // skip the whole tmux path BEFORE any session lookup: there is nothing to
@@ -1004,7 +1010,7 @@ export async function runMessageRouterTick(): Promise<void> {
       // per unique receiver per tick). Fall back to a direct call for agents not
       // in the pending set (shouldn't happen, but safe).
       const cached = agentSessionCache.get(msg.to_agent)
-      const session = cached?.session ?? agentSessionName(msg.to_agent)
+      const session = isMainAgent ? MAIN_CHANNELS_SESSION : (cached?.session ?? agentSessionName(msg.to_agent))
       const host = isMainAgent ? null : cached?.host ?? readAgentRemoteHost(msg.to_agent)
       const sessionExists = cached?.exists ?? sessionExistsOnHost(host, session)
       // Opt-in queue delivery. EVERY tmux-shaped gate below is skipped for these
@@ -1451,7 +1457,7 @@ export async function runMessageRouterTick(): Promise<void> {
         // worksource path has its own ack), and only rows that carry an
         // envelope msg_id (channel-inbound has none to look for). Async and
         // fire-and-forget: it neither delays nor blocks this loop.
-        if (turnCheckSentAt != null && !isChannelInbound) {
+        if (turnCheckSentAt != null && !isChannelInbound && !isMainAgent) {
           scheduleDeliveryTurnCheck({ toAgent: msg.to_agent, msgIds: [msg.id, ...turnCheckIds], sentAtMs: turnCheckSentAt, host })
         }
         // Propagate trace context: the receiving agent inherits this trace_id

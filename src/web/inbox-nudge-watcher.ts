@@ -58,7 +58,8 @@
 // relay's device key may write as the voice id (routes/messages.ts), so no fleet
 // agent can open this lane. Every other row keeps the 20 s path and its guards.
 import { logger } from '../logger.js'
-import { MAIN_AGENT_ID } from '../config.js'
+import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
+import { resolveConfiguredMainCliType } from '../cli-detector.js'
 import { getPendingMessages } from '../db.js'
 import { getEffectiveSettingValue } from '../settings-store.js'
 import { agentFacingLang } from './agent-text-lang.js'
@@ -276,6 +277,7 @@ export function runWatcherInterval(nowMono = performance.now()): Promise<void> {
 }
 
 async function voiceTick(): Promise<void> {
+  if (resolveConfiguredMainCliType(PROJECT_ROOT) !== 'claude') return
   try {
     const now = Date.now()
     const pending = getPendingMessages(MAIN_AGENT_ID)
@@ -311,6 +313,9 @@ async function voiceTick(): Promise<void> {
 }
 
 async function tick(): Promise<void> {
+  // Non-Claude main orchestrators (codex, agy) have no UserPromptSubmit drain hook;
+  // message-router delivers directly to their tmux session instead of pull/nudging.
+  if (resolveConfiguredMainCliType(PROJECT_ROOT) !== 'claude') return
   // The whole body is fenced: sendPromptToSession/tmux helpers throw on tmux
   // failure, this is a setInterval callback (fired via a void wrapper), and an
   // escaped throw/rejection would otherwise reach the uncaughtException handler

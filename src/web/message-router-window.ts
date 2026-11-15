@@ -76,14 +76,16 @@ export function selectTickWindow(
   localPending: readonly AgentMessage[],
   max: number,
   mainAgentId: string,
+  opts: { mainAgentPull?: boolean } = {},
 ): AgentMessage[] {
+  const mainPull = opts.mainAgentPull !== false
   const stops = localPending
-    .filter((m) => m.to_agent !== mainAgentId && isUrgentDelivery(m, mainAgentId))
+    .filter((m) => (!mainPull || m.to_agent !== mainAgentId) && isUrgentDelivery(m, mainAgentId))
     .slice(0, max)
   const stopIds = new Set(stops.map((m) => m.id))
   const perRecipient = new Map<string, AgentMessage[]>()
   for (const m of localPending) {
-    if (m.to_agent === mainAgentId || stopIds.has(m.id)) continue
+    if ((mainPull && m.to_agent === mainAgentId) || stopIds.has(m.id)) continue
     const rows = perRecipient.get(m.to_agent)
     if (rows) rows.push(m)
     else perRecipient.set(m.to_agent, [m])

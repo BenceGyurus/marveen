@@ -47,6 +47,21 @@ INSTALL_DIR="$INSTALL_DIR" python3 "${INSTALL_DIR}/scripts/boot-hook-prune.py" 2
 # and without a date the log cannot tell "started once" from "started twice".
 echo "=== $(date '+%Y-%m-%d %H:%M:%S %Z') ==="
 echo "${BOT_NAME:-Marveen} $(_t start.starting)"
+_has_telegram_token() {
+  local _cand _val
+  for _cand in \
+    "$INSTALL_DIR/.env" \
+    "$INSTALL_DIR/store/.claude-channels/telegram/.env" \
+    "$INSTALL_DIR/store/.channels/telegram/.env" \
+    "$INSTALL_DIR/.claude/channels/telegram/.env" \
+    "$HOME/.claude/channels/telegram/.env" \
+    "$HOME/.claude/channels/telegram-coordinator/.env"; do
+    [ -f "$_cand" ] || continue
+    _val="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$_cand" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "\"' \r" || true)"
+    [ -n "$_val" ] && return 0
+  done
+  return 1
+}
 OS="$(uname -s)"
 LAUNCHD_FAILED=""
 if [ "$OS" = "Darwin" ]; then
@@ -60,6 +75,19 @@ if [ "$OS" = "Darwin" ]; then
       LAUNCHD_FAILED="${LAUNCHD_FAILED}${_svc} "
     fi
   done
+  if _has_telegram_token; then
+    _cc_label="com.${UNIT_ID}.channel-coordinator"
+    if [ -x "${INSTALL_DIR}/scripts/install-channel-coordinator.sh" ]; then
+      _cc_label="$("${INSTALL_DIR}/scripts/install-channel-coordinator.sh" --print-label 2>/dev/null | head -1 || echo "$_cc_label")"
+      if [ ! -f "$HOME/Library/LaunchAgents/${_cc_label}.plist" ]; then
+        "${INSTALL_DIR}/scripts/install-channel-coordinator.sh" --load >/dev/null 2>&1 || true
+      fi
+    fi
+    if [ -f "$HOME/Library/LaunchAgents/${_cc_label}.plist" ]; then
+      start_launchd_unit "$_cc_label" >/dev/null 2>&1 || true
+    fi
+    unset _cc_label
+  fi
   unset _svc
 elif [ "$OS" = "Linux" ]; then
   # System-scope units first (root-style install): as root `systemctl --user`
@@ -71,8 +99,14 @@ elif [ "$OS" = "Linux" ]; then
       echo "ERROR: system units ${UNIT_ID}-dashboard/${UNIT_ID}-channels exist but could not be started (run as root?)" >&2
       exit 1
     fi
+    if _has_telegram_token && systemctl cat "${UNIT_ID}-channel-coordinator.service" >/dev/null 2>&1; then
+      systemctl start "${UNIT_ID}-channel-coordinator" 2>/dev/null || true
+    fi
   elif pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; then
     systemctl --user start "${UNIT_ID}-dashboard" "${UNIT_ID}-channels"
+    if _has_telegram_token && systemctl --user cat "${UNIT_ID}-channel-coordinator.service" >/dev/null 2>&1; then
+      systemctl --user start "${UNIT_ID}-channel-coordinator" 2>/dev/null || true
+    fi
   else
     echo "systemd not available (WSL or container), using direct launch..."
     mkdir -p "$INSTALL_DIR/store"
@@ -170,6 +204,14 @@ elif [ "$OS" = "Linux" ]; then
     else
       nohup bash "$INSTALL_DIR/scripts/channels.sh" > "$INSTALL_DIR/store/channels.log" 2>&1 9>&- &
       echo $! > "$INSTALL_DIR/store/channels.pid"
+    fi
+    if _has_telegram_token; then
+      if _service_live "$INSTALL_DIR/store/channel-coordinator.pid" "dist/channel-coordinator.js"; then
+        echo "Channel coordinator mar fut, ujrainditas kihagyva."
+      else
+        nohup "$NODE_BIN" "$INSTALL_DIR/dist/channel-coordinator.js" >> "$INSTALL_DIR/store/channel-coordinator.log" 2>&1 9>&- &
+        echo $! > "$INSTALL_DIR/store/channel-coordinator.pid"
+      fi
     fi
     # Released here (not on daemon exit): the pidfiles are already written, so a
     # second hook waking up now sees a live service and correctly no-ops.

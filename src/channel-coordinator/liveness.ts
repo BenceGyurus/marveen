@@ -17,6 +17,7 @@ import { PROJECT_ROOT } from '../config.js'
 import { channelStateDir, type ChannelProviderType } from '../channel-provider.js'
 import { agentDir } from '../web/agent-config.js'
 import { matchesProviderPollerCmd } from './provider-poller-match.js'
+import { resolveConfiguredMainCliType } from '../cli-detector.js'
 import { exactTmuxTarget } from '../tmux-target.js'
 import { stateDirPluginPollerPids } from '../web/channel-poller-reap.js'
 
@@ -477,6 +478,8 @@ export interface NativeStateFacts {
   pluginAlive: boolean
   keepaliveAgeMs: number | null
   msSinceLastRespawn: number | null
+  /** False when the main orchestrator runs on a CLI without native --channels plugins (e.g. codex, agy) or provider gromzo. */
+  nativePluginSupported?: boolean
 }
 
 // PURE decision: is the native channel currently NOT consuming inbound (so the
@@ -484,12 +487,15 @@ export interface NativeStateFacts {
 // native own inbound + its typing indicator), because a false "down" only
 // causes the coordinator to attempt a poll that 409-yields if native is in fact
 // alive. Layers:
+//   - non-native CLI (codex / agy): never runs a native plugin -> down at once
+//     (do not stall for STARTUP_GRACE_MS on every restart).
 //   - startup grace: within STARTUP_GRACE_MS of a respawn the plugin is still
 //     coming up; never declare down.
 //   - process gone: no claude pid, or no plugin grandchild -> down.
 //   - wedged TUI: process alive BUT keepalive stale past KEEPALIVE_STALE_MS ->
 //     the scheduled keepalive can't run, so the TUI is stuck (not just quiet).
 export function decideNativeChannelDown(f: NativeStateFacts): boolean {
+  if (f.nativePluginSupported === false) return true
   if (f.msSinceLastRespawn != null && f.msSinceLastRespawn < STARTUP_GRACE_MS) return false
   if (f.claudePid == null) return true
   if (!f.pluginAlive) return true
@@ -500,6 +506,16 @@ export function decideNativeChannelDown(f: NativeStateFacts): boolean {
 // Side-effecting: gather the live facts for the main channels session and apply
 // the pure decision.
 export function probeNativeChannelDown(session: string, provider: ChannelProviderType, agentName?: string): boolean {
+  const nativePluginSupported = !(!agentName && (provider === 'gromzo' || resolveConfiguredMainCliType(PROJECT_ROOT) !== 'claude'))
+  if (!nativePluginSupported) {
+    return decideNativeChannelDown({
+      claudePid: null,
+      pluginAlive: false,
+      keepaliveAgeMs: null,
+      msSinceLastRespawn: null,
+      nativePluginSupported: false,
+    })
+  }
   const now = Date.now()
   const claudePid = getClaudePidForSession(session)
   const pluginAlive = claudePid != null ? hasChannelPluginAlive(claudePid, provider, agentName) : false

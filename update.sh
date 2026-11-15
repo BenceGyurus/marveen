@@ -1362,6 +1362,92 @@ migrate_gromzo_provider() {
   return 0
 }
 
+_update_has_telegram_token() {
+  local _cand _val
+  for _cand in \
+    "$INSTALL_DIR/.env" \
+    "$INSTALL_DIR/store/.claude-channels/telegram/.env" \
+    "$INSTALL_DIR/store/.channels/telegram/.env" \
+    "$INSTALL_DIR/.claude/channels/telegram/.env" \
+    "$HOME/.claude/channels/telegram/.env" \
+    "$HOME/.claude/channels/telegram-coordinator/.env"; do
+    [ -f "$_cand" ] || continue
+    _val="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$_cand" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "\"' \r" || true)"
+    [ -n "$_val" ] && return 0
+  done
+  return 1
+}
+
+install_channel_coordinator_unit() {
+  [ -f "$INSTALL_DIR/dist/channel-coordinator.js" ] || return 0
+  if ! _update_has_telegram_token; then
+    return 0
+  fi
+  if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+    if [ -x "$INSTALL_DIR/scripts/install-channel-coordinator.sh" ]; then
+      _cc_lbl="$("$INSTALL_DIR/scripts/install-channel-coordinator.sh" --print-label 2>/dev/null | head -1 || true)"
+      if [ -n "$_cc_lbl" ] && [ ! -f "$HOME/Library/LaunchAgents/${_cc_lbl}.plist" ]; then
+        "$INSTALL_DIR/scripts/install-channel-coordinator.sh" --load >/dev/null 2>&1 || true
+      fi
+    fi
+    return 0
+  fi
+  [ "$(uname -s 2>/dev/null)" = "Linux" ] || return 0
+  local units_dir="${1:-$HOME/.config/systemd/user}"
+  [ -d "$units_dir" ] || return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1 || return 0
+  local _node_bin
+  _node_bin="$(command -v node || true)"
+  [ -n "$_node_bin" ] || return 0
+  for chan_unit in "$units_dir/"*-channels.service; do
+    [ -f "$chan_unit" ] || continue
+    local _svc_id _cc_unit _bot_name _tz_line _tz
+    _svc_id="$(basename "$chan_unit" -channels.service)"
+    _cc_unit="${_svc_id}-channel-coordinator"
+    if [ ! -f "$units_dir/${_cc_unit}.service" ]; then
+      _bot_name="$(sed -n 's/^BOT_NAME=//p' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | tr -d '"')"
+      [ -n "$_bot_name" ] || _bot_name="Marveen"
+      _tz_line="# no explicit TZ detected; inheriting host default"
+      _tz="$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || true)"
+      [ -n "$_tz" ] && [ "$_tz" != "UTC" ] && _tz_line="Environment=TZ=$_tz"
+      cat >"$units_dir/${_cc_unit}.service" <<EOF
+[Unit]
+Description=${_bot_name} Channel Coordinator (telegram)
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=$INSTALL_DIR
+ExecStartPre=$INSTALL_DIR/scripts/ensure-native-modules.sh
+ExecStart=${_node_bin} $INSTALL_DIR/dist/channel-coordinator.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:$INSTALL_DIR/store/channel-coordinator.log
+StandardError=append:$INSTALL_DIR/store/channel-coordinator.error.log
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=$HOME
+Environment=USER=$USER
+${_tz_line}
+
+[Install]
+WantedBy=default.target
+EOF
+      systemctl --user daemon-reload 2>/dev/null || true
+    fi
+    if ! systemctl --user is-active --quiet "${_cc_unit}.service" 2>/dev/null; then
+      if systemctl --user enable --now "${_cc_unit}.service" >/dev/null 2>&1; then
+        echo -e "  Channel coordinator telepitve es elinditva: ${_cc_unit}.service"
+      else
+        echo -e "  FIGYELEM: ${_cc_unit}.service nem indult el -- inditsd kezzel: systemctl --user enable --now ${_cc_unit}.service"
+      fi
+    fi
+  done
+  return 0
+}
+
 run_unit_maintenance() {
   repair_morning_timer "$@"
   migrate_channels_restart "$@"
@@ -1369,6 +1455,7 @@ run_unit_maintenance() {
   install_keepalive_probe_launchd "$@"
   install_stuck_modal_guard_launchd "$@"
   install_main_inbox_observer_unit "$@"
+  install_channel_coordinator_unit "$@"
   strip_legacy_notifier_telegram_env "$@"
   park_morning_timer "$@"
   scrub_rc_secrets
@@ -2144,7 +2231,7 @@ _unit_drift() {
     fi
     [ "$try" = "$main_id" ] && return 0
   done
-  for u in "${slug}-dashboard" "${slug}-channels"; do
+  for u in "${slug}-dashboard" "${slug}-channels" "${slug}-channel-coordinator"; do
     # Only enabled units are a promise; a deliberately disabled one is not drift.
     systemctl $scope is-enabled --quiet "$u" 2>/dev/null || continue
     systemctl $scope is-active --quiet "$u" 2>/dev/null || drift="${drift} ${u}"

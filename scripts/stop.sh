@@ -26,6 +26,7 @@ OS="$(uname -s)"
 if [ "$OS" = "Darwin" ]; then
   launchctl unload "$HOME/Library/LaunchAgents/com.${UNIT_ID}.dashboard.plist" 2>/dev/null
   launchctl unload "$HOME/Library/LaunchAgents/com.${UNIT_ID}.channels.plist" 2>/dev/null
+  launchctl unload "$HOME/Library/LaunchAgents/com.${UNIT_ID}.channel-coordinator.plist" 2>/dev/null || true
 elif [ "$OS" = "Linux" ]; then
   # A root-style install runs the services as SYSTEM units, and as root
   # `systemctl --user` fails -- so this script used to fall through to the
@@ -38,8 +39,11 @@ elif [ "$OS" = "Linux" ]; then
       echo "ERROR: system units ${UNIT_ID}-dashboard/${UNIT_ID}-channels exist but could not be stopped (run as root?)" >&2
       exit 1
     fi
+    if systemctl cat "${UNIT_ID}-channel-coordinator.service" >/dev/null 2>&1; then
+      systemctl stop "${UNIT_ID}-channel-coordinator" 2>/dev/null || true
+    fi
   elif pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; then
-    systemctl --user stop "${UNIT_ID}-dashboard" "${UNIT_ID}-channels" 2>/dev/null || true
+    systemctl --user stop "${UNIT_ID}-dashboard" "${UNIT_ID}-channels" "${UNIT_ID}-channel-coordinator" 2>/dev/null || true
   else
     # Signal, then WAIT for the process to actually be gone. `kill` only queues
     # a SIGTERM; returning immediately means this script reports "stopped" while
@@ -54,7 +58,7 @@ elif [ "$OS" = "Linux" ]; then
     # therefore no reason not to launch a SECOND instance: the exact double
     # poller this pair of scripts exists to prevent. A survivor keeps its pidfile
     # so the next start.sh correctly reads the service as still running.
-    for svc in dashboard channels; do
+    for svc in dashboard channels channel-coordinator; do
       pidfile="$INSTALL_DIR/store/${svc}.pid"
       if [ -f "$pidfile" ]; then
         pid=$(cat "$pidfile")
