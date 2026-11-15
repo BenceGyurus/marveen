@@ -50,8 +50,8 @@ Each adapter defines in one place:
 
 `GET /api/models/available` queries the host dynamically with a 30–60s in-memory cache:
 
-- **Codex (`getCodexAvailableModels`):** Reads `$CODEX_HOME/models_cache*.json` (default `~/.codex/models_cache.json`), filtering for `visibility === 'list'`, plus the default `model = "..."` entry in `~/.codex/config.toml`.
-- **Antigravity (`getAgyAvailableModels`):** Executes `agy models` and parses both non-TTY tab-separated (`<id>\t<Display Name>`) and TTY bullet (`• <Display Name> (<id>)`) output formats, supplemented by `~/.gemini/antigravity-cli/settings.json`.
+- **Codex (`getCodexAvailableModels`):** Reads `$CODEX_HOME/models_cache*.json` (default `~/.codex/models_cache.json`), filtering for `visibility === 'list'`, plus the default `model = "..."` entry in `~/.codex/config.toml`, emitting canonical **`codex:<model>`** IDs (`rawId` + `cli: 'codex'`).
+- **Antigravity (`getAgyAvailableModels`):** Executes `agy models`, strips `\r` spinner frames, and parses space/tab-delimited (`<id>   <Display Name>` / `<id>\t<Display Name>`) and TTY bullet (`• <Display Name> (<id>)`) formats into canonical **`agy:<model>`** IDs (`Antigravity · ...` badges cleanly disambiguating shared names such as `agy:claude-opus-5-5-high` vs native `claude-opus-4-6`), supplemented by `~/.gemini/antigravity-cli/settings.json`.
 
 ### 3. Tmux TUI State Machine & Transcripts
 
@@ -67,3 +67,15 @@ Each adapter defines in one place:
 - **Path Traversal & Symlink Protection (`SAFE_CONV_ID_RX`):** Conversation IDs read from `last_conversations.json` are validated against `^[a-zA-Z0-9_-]{1,128}$`, and both transcript readers and config stampers verify `!lstatSync(path).isSymbolicLink()`.
 - **Strict File Permissions (`0o600`):** Workspace trust updates to `~/.codex/config.toml` and `~/.gemini/antigravity-cli/settings.json` enforce `0o600` file permissions (`0o700` on parent directories).
 - **Credential Isolation & Strict Permission Profile:** Non-Claude launches execute `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY`, and when `profile.permissionMode === 'strict'`, `codex` uses `--sandbox workspace-write` instead of `--dangerously-bypass-approvals-and-sandbox` while `agy` omits `--dangerously-skip-permissions`.
+
+---
+
+## ⚡ Automatic Headroom AI Optimization
+
+Marveen automatically integrates [Headroom](https://github.com/headroomlabs-ai/headroom) across `claude`, `codex`, and `agy`:
+
+- **Bundled Safe Installer (`scripts/install-headroom.sh`):** Invoked by `install-macos.sh`, `install-linux.sh`, and `update.sh`. Prefers `uv tool install headroom-ai[all]` (fallback `headroom-ai[proxy,mcp]`), or creates an isolated Python ≥ 3.10 venv at `~/.local/share/marveen-headroom-venv` symlinked to `~/.local/bin/headroom`. Fails soft offline and can be disabled with `MARVEEN_HEADROOM=0`.
+- **Automatic Session Wrapping (`headroom wrap`):** When `headroom` is present and enabled, the main tmux session (`scripts/channels.sh`), local sub-agents (`agent-process.ts`), and background workers (`agent-worker.ts`) launch via `headroom wrap <cli> --` (skipping `headroom wrap claude` when a custom Anthropic Base URL such as OpenRouter/DeepSeek is active).
+- **Zero-Secret MCP Registration (`headroom mcp serve`):** `syncCliMcpConfig()` automatically registers `headroom mcp serve` into Claude's `.mcp.json`, Codex's `~/.codex/config.toml` (`[mcp_servers.headroom]`), and Antigravity's `~/.gemini/antigravity/mcp_config.json` with symlink refusal, `0o600` file permissions, and secret/token stripping for forwarded MCP server env vars.
+- **Process Tree Liveness (`liveness.ts` & `scripts/channels.sh`):** Watchdog and channel liveness checks traverse through `headroom` wrapper parent PIDs to track the underlying `claude`/`codex`/`agy` child processes.
+- **Status Exposure (`GET /api/models/available`):** Includes a `headroom` object (`available`, `enabled`, `binPath`, `version`, `wrapTargets`).

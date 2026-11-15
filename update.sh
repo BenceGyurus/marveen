@@ -1703,6 +1703,11 @@ if [ -x "$INSTALL_DIR/scripts/sync-hooks.sh" ]; then
   bash "$INSTALL_DIR/scripts/sync-hooks.sh" || echo -e "  FIGYELEM: sync-hooks.sh nem-nulla exit; manualisan ellenorizd."
 fi
 
+if [ -f "$INSTALL_DIR/scripts/install-headroom.sh" ]; then
+  echo -e "  Headroom AI ellenorzese / frissitese..."
+  bash "$INSTALL_DIR/scripts/install-headroom.sh" --upgrade || true
+fi
+
 # Unit maintenance (morning-timer repair + channels restart-policy migration)
 # deliberately does NOT live here any more. It ran from this spot for weeks and
 # was unreachable on an already-current machine, because the up-to-date branch

@@ -126,7 +126,7 @@ const tmuxBin = makeLazyBinResolver('tmux')
 const claudeBin = makeLazyBinResolver('claude')
 const codexBin = makeLazyBinResolver('codex')
 const agyBin = makeLazyBinResolver('agy')
-import { getCliTypeForModel, getCliProvider, stripCliModelPrefix, prepareWorkspaceForCli, type CliType } from '../cli-detector.js'
+import { getCliTypeForModel, getCliProvider, stripCliModelPrefix, prepareWorkspaceForCli, resolveHeadroomLauncher, type CliType } from '../cli-detector.js'
 
 // Shared async pacing helper. Replaces the blocking synchronous `/bin/sleep`
 // (execFileSync) pauses in the tmux-driving injection hot-path so a pacing wait
@@ -3422,7 +3422,15 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     // FLEETVENV923: the fleet venv's bin/ goes FIRST so its python3 beats the
     // Homebrew one that carries no packages.
     const venvPathPrefix = fleetVenvPathPrefix()
-    const buildLaunchCmd = (launchCwd: string) => `${umaskPrefix}export PATH="${venvPathPrefix}/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${stateFence}${autoUpdaterEnv}${byoUnsetEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${helperTokenEnvPiece}${agentEgressEnv}${oauthTokenEnv}${providerEnv}${stateObserverEnv}cd "${launchCwd}" && ${cliType === 'codex' ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${codexBin()} ${continueFlag ? 'resume --last ' : ''}${skipFlag ? '--dangerously-bypass-approvals-and-sandbox ' : '--sandbox workspace-write '}${cleanModel ? `-m ${shSingleQuote(cleanModel)}` : ''}` : cliType === 'agy' ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${agyBin()} ${continueFlag}${skipFlag}${cleanModel ? `--model ${shSingleQuote(cleanModel)}` : ''}` : `${claudeBin()} ${continueFlag}${skipFlag}--model ${shSingleQuote(model)} ${channelFlag}${worksourceFlags}${bashSandboxFlag}`}`.trimEnd()
+    const hasCustomClaudeBaseUrl = cliType === 'claude' && (isCustom || model.includes('/') || model.startsWith('deepseek-') || model.startsWith('minimax-'))
+    const headroomClaudeWrap = cliType === 'claude' ? resolveHeadroomLauncher('claude', '', { hasCustomBaseUrl: hasCustomClaudeBaseUrl }) : ''
+    const claudeModelArg = model.startsWith('claude:') ? (cleanModel || model) : model
+    const altCliCmd = cliType === 'codex'
+      ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${resolveHeadroomLauncher('codex', codexBin())} ${continueFlag ? 'resume --last ' : ''}${skipFlag ? '--dangerously-bypass-approvals-and-sandbox ' : '--sandbox workspace-write '}${cleanModel ? `-m ${shSingleQuote(cleanModel)}` : ''}`.trimEnd()
+      : cliType === 'agy'
+        ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${resolveHeadroomLauncher('agy', agyBin())} ${continueFlag}${skipFlag}${cleanModel ? `--model ${shSingleQuote(cleanModel)}` : ''}`.trimEnd()
+        : ''
+    const buildLaunchCmd = (launchCwd: string) => `${umaskPrefix}export PATH="${venvPathPrefix}/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${stateFence}${autoUpdaterEnv}${byoUnsetEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${helperTokenEnvPiece}${agentEgressEnv}${oauthTokenEnv}${providerEnv}${stateObserverEnv}cd "${launchCwd}" && ${altCliCmd || `${headroomClaudeWrap || `${claudeBin()}`} ${continueFlag}${skipFlag}--model ${shSingleQuote(claudeModelArg)} ${channelFlag}${worksourceFlags}${bashSandboxFlag}`.trimEnd()}`
     // The agent's own target: for a per-user agent this is what makes the whole
     // session (and every process inside it) belong to that uid. Passing null here
     // silently started it as the router's user -- measured 2026-08-19: the start

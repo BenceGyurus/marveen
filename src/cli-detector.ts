@@ -14,9 +14,15 @@ import {
   parseAgyModelsOutput,
   stampCodexWorkspaceTrust,
   stampAgyWorkspaceTrust,
+  isHeadroomEnabled,
+  resolveHeadroomBinary,
+  resolveHeadroomLauncher,
+  detectHeadroomInfo,
+  syncCliMcpConfig,
   type CliType,
   type CliToolInfo,
   type CliModelEntry,
+  type HeadroomToolInfo,
   type CliProviderAdapter,
   type TimelineEntryItem,
   type RawTranscriptEventItem,
@@ -35,9 +41,15 @@ export {
   parseAgyModelsOutput,
   stampCodexWorkspaceTrust,
   stampAgyWorkspaceTrust,
+  isHeadroomEnabled,
+  resolveHeadroomBinary,
+  resolveHeadroomLauncher,
+  detectHeadroomInfo,
+  syncCliMcpConfig,
   type CliType,
   type CliToolInfo,
   type CliModelEntry,
+  type HeadroomToolInfo,
   type CliProviderAdapter,
   type TimelineEntryItem,
   type RawTranscriptEventItem,
@@ -107,6 +119,18 @@ export function stripCliModelPrefix(model: string): string {
   return stripped
 }
 
+/**
+ * Format a model identifier with its explicit CLI prefix (`codex:<model>`, `agy:<model>`)
+ * when running on a non-Claude CLI so shared model names (e.g. `claude-opus-4-6` on Antigravity)
+ * never collide with Claude Code's native model IDs.
+ */
+export function formatCliModelId(cliType: CliType, model: string): string {
+  const clean = stripCliModelPrefix(model) || (model ?? '').trim()
+  if (!clean) return ''
+  if (cliType === 'claude') return clean
+  return `${cliType}:${clean}`
+}
+
 let cachedClis: { at: number; value: Record<CliType, CliToolInfo> } | null = null
 const CLI_CACHE_TTL_MS = 30_000
 
@@ -138,8 +162,9 @@ export function detectAvailableClis(): Record<CliType, CliToolInfo> {
 }
 
 /**
- * Ensure an agent/worker directory has instruction symlinks (`AGENTS.md`, `GEMINI.md`, etc. -> `CLAUDE.md`)
- * and pre-trust the workspace in the target CLI provider's local config so interactive prompts do not block startup.
+ * Ensure an agent/worker directory has instruction symlinks (`AGENTS.md`, `GEMINI.md`, etc. -> `CLAUDE.md`),
+ * pre-trust the workspace in the target CLI provider's local config, and synchronize MCP servers
+ * (including Headroom `headroom mcp serve` when available).
  */
 export function prepareWorkspaceForCli(dir: string, cliType: CliType): void {
   const provider = getCliProvider(cliType)
@@ -165,4 +190,5 @@ export function prepareWorkspaceForCli(dir: string, cliType: CliType): void {
   } catch { /* best-effort instruction symlink */ }
 
   provider.stampWorkspaceTrust(dir)
+  syncCliMcpConfig(cliType, join(dir, '.mcp.json'))
 }

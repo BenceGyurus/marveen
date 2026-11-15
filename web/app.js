@@ -4539,6 +4539,60 @@ function attachTmuxCopyButtons(card, agent) {
   card.appendChild(row)
 }
 
+function formatModelBadgeLabel(model, cliType) {
+  if (!model || model === 'inherit') return 'inherit'
+  if (model.startsWith('agy:')) return `Antigravity · ${model.slice(4)}`
+  if (model.startsWith('codex:')) return `Codex · ${model.slice(6)}`
+  if (model.startsWith('claude:')) return `Claude · ${model.slice(7)}`
+  if (cliType === 'agy') return `Antigravity · ${model}`
+  if (cliType === 'codex') return `Codex · ${model}`
+  if (model.startsWith('gpt-') || model.startsWith('o1') || model.startsWith('o3') || model.startsWith('o4') || model.includes('codex')) {
+    return `Codex · ${model}`
+  }
+  if (model.startsWith('gemini-')) return `Antigravity · ${model}`
+  return model
+}
+
+function findMatchingModelOption(sel, rawValue) {
+  if (!sel || !rawValue) return null
+  const opts = Array.from(sel.options)
+  return opts.find(o => o.value === rawValue) || opts.find(o => o.dataset && o.dataset.rawId === rawValue) || null
+}
+
+function populateDynamicCliGroup(groupIds, models, groupLabel) {
+  const list = Array.isArray(models) ? models : []
+  for (const groupId of groupIds) {
+    const group = document.getElementById(groupId)
+    if (!group) continue
+    const sel = group.parentElement
+    const prevVal = sel ? sel.value : ''
+    group.label = groupLabel
+    group.innerHTML = ''
+    if (list.length === 0) {
+      group.style.display = 'none'
+      continue
+    }
+    group.style.display = ''
+    for (const m of list) {
+      if (sel) {
+        Array.from(sel.querySelectorAll('option.dynamic-model-opt')).forEach((o) => {
+          if (o.value === m.id || (m.rawId && o.value === m.rawId)) o.remove()
+        })
+      }
+      const opt = document.createElement('option')
+      opt.value = m.id
+      if (m.rawId) opt.dataset.rawId = m.rawId
+      if (m.cli) opt.dataset.cli = m.cli
+      opt.textContent = m.label
+      group.appendChild(opt)
+    }
+    if (sel && prevVal) {
+      const matched = findMatchingModelOption(sel, prevVal)
+      if (matched) sel.value = matched.value
+    }
+  }
+}
+
 function renderAgents() {
   agentsGrid.querySelectorAll('.agent-card:not(.add-card)').forEach((el) => el.remove())
 
@@ -4550,8 +4604,8 @@ function renderAgents() {
     // model (readActiveModelFromProjectDir). Mirror the sub-agent card, which
     // uses the model value as both the badge label and class. Fall back to
     // 'opus' only before /api/marveen has resolved (or on a legacy backend).
-    const mainModelLabel = m.model || 'opus'
-    const mainModelClass = m.model || 'opus'
+    const mainModelLabel = formatModelBadgeLabel(m.model || 'opus', m.cliType)
+    const mainModelClass = String(m.model || 'opus').replace(/^(?:agy|codex|claude):/, '')
     const mCard = document.createElement('div')
     mCard.className = 'agent-card marveen-card'
     mCard.innerHTML = `
@@ -4608,8 +4662,8 @@ function renderAgents() {
       ? `<img src="/api/agents/${encodeURIComponent(agent.name)}/avatar${avatarBust()}" alt="${escapeHtml(label)}">`
       : initial
 
-    const modelClass = agent.model && agent.model !== 'inherit' ? agent.model : ''
-    const modelLabel = agent.model || 'inherit'
+    const modelClass = agent.model && agent.model !== 'inherit' ? String(agent.model).replace(/^(?:agy|codex|claude):/, '') : ''
+    const modelLabel = formatModelBadgeLabel(agent.model || 'inherit', agent.cliType)
     const chConnected = agentOwnChannelConnected(agent)
     const chDotClass = chConnected ? 'connected' : 'disconnected'
     const chLabel = chConnected ? t('agents.status.online') : t('agents.status.offline')
@@ -4855,7 +4909,7 @@ async function openAgentDetail(agentName) {
     : initial
   document.getElementById('agentDetailName').textContent = detailLabel
   document.getElementById('agentDetailDesc').textContent = currentAgent.description || ''
-  document.getElementById('agentDetailModel').textContent = currentAgent.activeModel || currentAgent.model || 'inherit'
+  document.getElementById('agentDetailModel').textContent = formatModelBadgeLabel(currentAgent.activeModel || currentAgent.model || 'inherit', currentAgent.cliType)
   document.getElementById('agentDetailModelRestarting').hidden = true
 
   const chConnected = agentOwnChannelConnected(currentAgent)
@@ -4888,14 +4942,16 @@ async function openAgentDetail(agentName) {
       // A model saved as the picker value ("custom:<id>") is no model id: leave the field empty, so a save asks for one.
       if (modelInput) modelInput.value = mv.startsWith('custom:') ? '' : mv
     } else {
-      if (!Array.from(sel.options).some(o => o.value === mv)) {
+      let matchedOpt = findMatchingModelOption(sel, mv)
+      if (!matchedOpt) {
         const opt = document.createElement('option')
         opt.value = mv
         opt.className = 'dynamic-model-opt'
         opt.textContent = mv.startsWith('openrouter-auto:') ? `🔀 ${mv}` : `🔀 ${mv}`
         sel.appendChild(opt)
+        matchedOpt = opt
       }
-      sel.value = mv
+      sel.value = matchedOpt.value
     }
     // PICKERCLIKAPU923: re-apply the CLI gate AFTER the value is set, so the
     // agent's current model is never the disabled option regardless of which
@@ -5574,57 +5630,8 @@ async function loadAvailableModels() {
     const data = await res.json()
     applyClaudeCliGate(data)
 
-    const codexModels = Array.isArray(data.codex) ? data.codex : []
-    for (const group of [document.getElementById('codexModelGroup'), document.getElementById('agentModelCodexGroup')]) {
-      if (!group) continue
-      const sel = group.parentElement
-      const prevVal = sel ? sel.value : ''
-      group.label = t('agents.model.optgroup_codex')
-      group.innerHTML = ''
-      if (codexModels.length === 0) {
-        group.style.display = 'none'
-        continue
-      }
-      group.style.display = ''
-      for (const m of codexModels) {
-        if (sel) {
-          Array.from(sel.querySelectorAll('option.dynamic-model-opt')).forEach((o) => {
-            if (o.value === m.id) o.remove()
-          })
-        }
-        const opt = document.createElement('option')
-        opt.value = m.id
-        opt.textContent = m.label
-        group.appendChild(opt)
-      }
-      if (sel && prevVal) sel.value = prevVal
-    }
-
-    const agyModels = Array.isArray(data.agy) ? data.agy : []
-    for (const group of [document.getElementById('agyModelGroup'), document.getElementById('agentModelAgyGroup')]) {
-      if (!group) continue
-      const sel = group.parentElement
-      const prevVal = sel ? sel.value : ''
-      group.label = t('agents.model.optgroup_agy')
-      group.innerHTML = ''
-      if (agyModels.length === 0) {
-        group.style.display = 'none'
-        continue
-      }
-      group.style.display = ''
-      for (const m of agyModels) {
-        if (sel) {
-          Array.from(sel.querySelectorAll('option.dynamic-model-opt')).forEach((o) => {
-            if (o.value === m.id) o.remove()
-          })
-        }
-        const opt = document.createElement('option')
-        opt.value = m.id
-        opt.textContent = m.label
-        group.appendChild(opt)
-      }
-      if (sel && prevVal) sel.value = prevVal
-    }
+    populateDynamicCliGroup(['codexModelGroup', 'agentModelCodexGroup'], data.codex, t('agents.model.optgroup_codex'))
+    populateDynamicCliGroup(['agyModelGroup', 'agentModelAgyGroup'], data.agy, t('agents.model.optgroup_agy'))
 
     const deepseekModels = Array.isArray(data.deepseek) ? data.deepseek : []
     const editGroup = document.getElementById('deepseekModelGroup')

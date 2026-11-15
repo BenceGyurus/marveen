@@ -660,6 +660,11 @@ if ! command -v claude &>/dev/null; then
 fi
 echo -e "  ${GREEN}✓${NC} Claude Code CLI"
 
+if [ -f "$INSTALL_DIR/scripts/install-headroom.sh" ]; then
+  echo -e "  Headroom AI (kontextus- es token-optimalizalas) telepitese..."
+  bash "$INSTALL_DIR/scripts/install-headroom.sh" || true
+fi
+
 INSTALL_STEP="claude-setup"
 # Step 2: Claude Code first-run flags (BEFORE auth login)
 #

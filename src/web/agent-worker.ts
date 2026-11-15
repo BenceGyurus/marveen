@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { homedir, tmpdir, userInfo } from 'node:os'
 import { createHash } from 'node:crypto'
 import { resolveFromPath, tryResolveFromPath } from '../platform.js'
-import { getCliTypeForModel, getCliProvider, stripCliModelPrefix, stampAgyWorkspaceTrust, stampCodexWorkspaceTrust } from '../cli-detector.js'
+import { getCliTypeForModel, getCliProvider, stripCliModelPrefix, resolveHeadroomLauncher, stampAgyWorkspaceTrust, stampCodexWorkspaceTrust, syncCliMcpConfig } from '../cli-detector.js'
 import { logger } from '../logger.js'
 import { launchableInstallDefaultSync, launchableDistributionDefaultSync } from './default-model-guard.js'
 import { measureClaudeCliVersionSync } from './claude-cli-version.js'
@@ -931,7 +931,22 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
     notifyWorkerModelFallback(decision, Date.now())
   }
 
+  const workerCliType = getCliTypeForModel(workerModel)
+  const cleanWorkerModel = stripCliModelPrefix(workerModel)
+  if (workerCliType === 'codex') {
+    stampCodexWorkspaceTrust(ctx.home)
+    syncCliMcpConfig('codex', workerMcpConfigPath(ctx))
+  } else if (workerCliType === 'agy') {
+    stampAgyWorkspaceTrust(ctx.home)
+    syncCliMcpConfig('agy', workerMcpConfigPath(ctx))
+  }
+
   const claudeLaunchBin = tryResolveFromPath('claude') ?? 'claude'
+  const claudeCmd = resolveHeadroomLauncher('claude', shArg(claudeLaunchBin), {
+    hasCustomBaseUrl: customEnvPrefix.length > 0 || workerModel.includes('/') || workerModel.startsWith('deepseek-') || workerModel.startsWith('minimax-'),
+  })
+  const codexCmd = resolveHeadroomLauncher('codex', shArg(tryResolveFromPath('codex') ?? 'codex'))
+  const agyCmd = resolveHeadroomLauncher('agy', shArg(tryResolveFromPath('agy') ?? 'agy'))
   const autoUpdaterEnv = workerAutoUpdaterEnv({
     role: ctx === ctxSlow ? 'slow' : 'fast',
     optIn: WORKER_AUTOUPDATE,
@@ -951,11 +966,11 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
     `${ROOT_SANDBOX_ENV}; ` +
     customEnvPrefix +
     `cd ${shArg(ctx.home)} && ` +
-    (getCliTypeForModel(workerModel) === 'codex'
-      ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${shArg(tryResolveFromPath('codex') ?? 'codex')} --dangerously-bypass-approvals-and-sandbox --no-alt-screen${stripCliModelPrefix(workerModel) ? ` -m ${shArg(stripCliModelPrefix(workerModel))}` : ''}`
-      : getCliTypeForModel(workerModel) === 'agy'
-        ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${shArg(tryResolveFromPath('agy') ?? 'agy')} --dangerously-skip-permissions --mode auto${stripCliModelPrefix(workerModel) ? ` --model ${shArg(stripCliModelPrefix(workerModel))}` : ''}`
-        : `${shArg(claudeLaunchBin)} --dangerously-skip-permissions --model ${shArg(workerModel)} ` +
+    (workerCliType === 'codex'
+      ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${codexCmd} --dangerously-bypass-approvals-and-sandbox --no-alt-screen${cleanWorkerModel ? ` -m ${shArg(cleanWorkerModel)}` : ''}`
+      : workerCliType === 'agy'
+        ? `unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY && ${agyCmd} --dangerously-skip-permissions --mode auto${cleanWorkerModel ? ` --model ${shArg(cleanWorkerModel)}` : ''}`
+        : `${claudeCmd} --dangerously-skip-permissions --model ${shArg(workerModel)} ` +
           // WORKERMCPSEND1104 part 2: only the servers in the worker's own MCP config, nothing from any other source.
           `--strict-mcp-config --mcp-config ${shArg(workerMcpConfigPath(ctx))}`)
   execFileSync(TMUX, ['new-session', '-d', '-s', ctx.session, '-c', ctx.home, 'bash', '-lc', launch], { timeout: 8000 })

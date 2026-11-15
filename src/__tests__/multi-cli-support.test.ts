@@ -1,18 +1,25 @@
 import { describe, it, expect } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import {
   getCliTypeForModel,
   getCliProvider,
   listCliProviders,
   listNonClaudeCliProviders,
   stripCliModelPrefix,
+  formatCliModelId,
   getCodexAvailableModels,
   getAgyAvailableModels,
   prepareWorkspaceForCli,
   stampCodexWorkspaceTrust,
   stampAgyWorkspaceTrust,
+  resolveHeadroomBinary,
+  resolveHeadroomLauncher,
+  detectHeadroomInfo,
+  syncCliMcpConfig,
 } from '../cli-detector.js'
 import {
   detectPaneState,
@@ -100,23 +107,42 @@ describe('cli-detector: model to CLI routing and dynamic model extraction', () =
       writeFileSync(join(fakeCodexHome, 'config.toml'), 'model = "configured-codex-beta"\n')
 
       const codex = getCodexAvailableModels({ codexHome: fakeCodexHome })
-      expect(codex.map(m => m.id)).toEqual(['custom-codex-alpha', 'configured-codex-beta'])
+      expect(codex.map(m => m.id)).toEqual(['codex:custom-codex-alpha', 'codex:configured-codex-beta'])
+      expect(codex.map(m => m.rawId)).toEqual(['custom-codex-alpha', 'configured-codex-beta'])
+      expect(codex[0]?.cli).toBe('codex')
       expect(codex[0]?.label).toBe('Custom Codex Alpha (Codex)')
+      expect(getCliTypeForModel('codex:custom-codex-alpha')).toBe('codex')
       expect(getCliTypeForModel('custom-codex-alpha')).toBe('codex')
       expect(getCliTypeForModel('configured-codex-beta')).toBe('codex')
 
       const agy = getAgyAvailableModels({
         runner: () => [
           'Fetching available models...',
-          'dynamic-agy-model-v1\tDynamic Agy Model',
+          '\r- Fetching available models...\r  dynamic-agy-model-v1   Dynamic Agy Model',
           '  • Secondary Agy Model (secondary-agy-v2)',
+          '  claude-opus-5-5-high   Claude Opus 4.6 (Thinking)',
+          '  gpt-oss-120b-medium    GPT-OSS 120B (Medium)',
         ].join('\n'),
         settingsPath: join(fakeCodexHome, 'nonexistent-settings.json'),
       })
-      expect(agy.map(m => m.id)).toEqual(['dynamic-agy-model-v1', 'secondary-agy-v2'])
+      expect(agy.map(m => m.id)).toEqual([
+        'agy:dynamic-agy-model-v1',
+        'agy:secondary-agy-v2',
+        'agy:claude-opus-5-5-high',
+        'agy:gpt-oss-120b-medium',
+      ])
       expect(agy[0]?.label).toBe('Dynamic Agy Model (Antigravity)')
+      expect(agy[2]?.cli).toBe('agy')
+      expect(agy[2]?.rawId).toBe('claude-opus-5-5-high')
+      expect(getCliTypeForModel('agy:dynamic-agy-model-v1')).toBe('agy')
       expect(getCliTypeForModel('dynamic-agy-model-v1')).toBe('agy')
       expect(getCliTypeForModel('secondary-agy-v2')).toBe('agy')
+      // Shared Claude/GPT names stay unambiguous across agents
+      expect(getCliTypeForModel('agy:claude-opus-5-5-high')).toBe('agy')
+      expect(getCliTypeForModel('claude-opus-5-5-high')).toBe('agy')
+      expect(getCliTypeForModel('claude-opus-4-6')).toBe('claude')
+      expect(getCliTypeForModel('agy:gpt-oss-120b-medium')).toBe('agy')
+      expect(getCliTypeForModel('codex:gpt-5.4')).toBe('codex')
     } finally {
       rmSync(fakeCodexHome, { recursive: true, force: true })
     }
@@ -265,7 +291,7 @@ describe('active-model: Antigravity and Codex transcript readers', () => {
 
       const foundAgy = findAltCliTranscriptForWorkingDir(agyWorkdir, fakeHome)
       expect(foundAgy?.cli).toBe('agy')
-      expect(readAltCliActiveModel(agyWorkdir, undefined, fakeHome)).toBe('gemini-2.5-flash')
+      expect(readAltCliActiveModel(agyWorkdir, undefined, fakeHome)).toBe('agy:gemini-2.5-flash')
 
       // 2. Codex fixture
       const codexDayDir = join(fakeHome, '.codex', 'sessions', '2026', '11', '15')
@@ -290,15 +316,15 @@ describe('active-model: Antigravity and Codex transcript readers', () => {
 
       const foundCodex = findAltCliTranscriptForWorkingDir(codexWorkdir, fakeHome)
       expect(foundCodex?.cli).toBe('codex')
-      expect(readAltCliActiveModel(codexWorkdir, undefined, fakeHome)).toBe('gpt-5.4')
-      expect(readLastAssistantModel(codexWorkdir, undefined, fakeHome)?.model).toBe('gpt-5.4')
+      expect(readAltCliActiveModel(codexWorkdir, undefined, fakeHome)).toBe('codex:gpt-5.4')
+      expect(readLastAssistantModel(codexWorkdir, undefined, fakeHome)?.model).toBe('codex:gpt-5.4')
       expect(readLastTurnActivityMs(codexWorkdir, undefined, fakeHome)).toBe(Date.parse('2026-11-15T18:01:02Z'))
       expect(readContextTokensFromProjectDir(codexWorkdir, undefined, fakeHome)).toBe(15400)
       expect(readTranscriptMtimeFromProjectDir(codexWorkdir, undefined, fakeHome)).toBeGreaterThan(0)
       expect(readTranscriptTailFromProjectDir(codexWorkdir, undefined, 4096, fakeHome)).toContain('Rendben!')
       expect(readLastConversationTsFromProjectDir(codexWorkdir, undefined, 4096, fakeHome)).toBe(Date.parse('2026-11-15T18:01:03Z'))
 
-      expect(readLastAssistantModel(agyWorkdir, undefined, fakeHome)?.model).toBe('gemini-2.5-flash')
+      expect(readLastAssistantModel(agyWorkdir, undefined, fakeHome)?.model).toBe('agy:gemini-2.5-flash')
       expect(readLastTurnActivityMs(agyWorkdir, undefined, fakeHome)).toBe(Date.parse('2026-11-15T18:00:02Z'))
       expect(readLastConversationTsFromProjectDir(agyWorkdir, undefined, 4096, fakeHome)).toBe(Date.parse('2026-11-15T18:00:02Z'))
 
@@ -352,6 +378,211 @@ describe('active-model: Antigravity and Codex transcript readers', () => {
       const symlinkCfg = join(tmp, 'symlink-settings.json')
       symlinkSync(agyCfg, symlinkCfg)
       expect(stampAgyWorkspaceTrust(join(tmp, 'other-ws'), symlinkCfg)).toBe(false)
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('headroom integration: launcher, MCP config sync, and sandboxed installer', () => {
+  it('formats canonical model IDs cleanly per CLI agent', () => {
+    expect(formatCliModelId('agy', 'claude-opus-5-5-high')).toBe('agy:claude-opus-5-5-high')
+    expect(formatCliModelId('codex', 'gpt-5.4')).toBe('codex:gpt-5.4')
+    expect(formatCliModelId('codex', 'codex:gpt-5.4')).toBe('codex:gpt-5.4')
+    expect(formatCliModelId('claude', 'claude-opus-4-6')).toBe('claude-opus-4-6')
+    expect(formatCliModelId('claude', 'claude:claude-opus-4-6')).toBe('claude-opus-4-6')
+  })
+
+  it('resolves headroom launcher wrappers for claude, codex, and agy with safe fallbacks', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'marveen-headroom-launcher-'))
+    try {
+      const fakeHr = join(tmp, 'headroom')
+      writeFileSync(
+        fakeHr,
+        [
+          '#!/usr/bin/env bash',
+          'if [ "$1" = "--version" ]; then echo "headroom 0.9.9"; exit 0; fi',
+          'if [ "$1" = "wrap" ] && [ "$2" = "--help" ]; then',
+          '  echo "Supported tools: claude, codex, agy"',
+          '  exit 0',
+          'fi',
+          'exit 0',
+        ].join('\n') + '\n',
+      )
+      chmodSync(fakeHr, 0o755)
+
+      const env = { HEADROOM_BIN: fakeHr, PATH: '/usr/bin:/bin' }
+      expect(resolveHeadroomBinary({ env, homeDir: tmp })).toBe(fakeHr)
+
+      const info = detectHeadroomInfo({ env, homeDir: tmp })
+      expect(info.available).toBe(true)
+      expect(info.enabled).toBe(true)
+      expect(info.binPath).toBe(fakeHr)
+      expect(info.version).toBe('headroom 0.9.9')
+      expect(info.wrapTargets).toEqual(expect.arrayContaining(['claude', 'codex', 'agy']))
+
+      expect(resolveHeadroomLauncher('claude', "'/opt/bin/claude'", { env, homeDir: tmp })).toBe(`${fakeHr} wrap claude --`)
+      expect(resolveHeadroomLauncher('codex', "'/opt/bin/codex'", { env, homeDir: tmp })).toBe(`${fakeHr} wrap codex --`)
+      expect(resolveHeadroomLauncher('agy', "'/opt/bin/agy'", { env, homeDir: tmp })).toBe(`${fakeHr} wrap agy --`)
+
+      // Custom OpenRouter/DeepSeek Anthropic Base URL skips Headroom proxy wrap on claude
+      expect(resolveHeadroomLauncher('claude', "'/opt/bin/claude'", { hasCustomBaseUrl: true, env, homeDir: tmp })).toBe("'/opt/bin/claude'")
+
+      // MARVEEN_HEADROOM=0 opt-out falls back cleanly to the raw CLI binary
+      const disabledEnv = { ...env, MARVEEN_HEADROOM: '0' }
+      expect(resolveHeadroomLauncher('claude', "'/opt/bin/claude'", { env: disabledEnv, homeDir: tmp })).toBe("'/opt/bin/claude'")
+      expect(resolveHeadroomLauncher('codex', "'/opt/bin/codex'", { env: disabledEnv, homeDir: tmp })).toBe("'/opt/bin/codex'")
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('syncs headroom MCP server configuration safely for claude, codex, and agy without leaking credentials', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'marveen-headroom-mcp-'))
+    try {
+      const fakeHr = join(tmp, 'headroom')
+      writeFileSync(fakeHr, '#!/usr/bin/env bash\necho "0.9.9"\n')
+      chmodSync(fakeHr, 0o755)
+
+      const env = { HEADROOM_BIN: fakeHr, PATH: '/usr/bin:/bin' }
+
+      // 1. Claude .mcp.json (written cleanly and preserves unrelated servers)
+      const mcpJsonPath = join(tmp, '.mcp.json')
+      writeFileSync(mcpJsonPath, JSON.stringify({ mcpServers: { existing: { command: 'node', args: ['x.js'] } } }))
+      expect(syncCliMcpConfig('claude', mcpJsonPath, { env, homeDir: tmp })).toBe(true)
+      const parsedClaudeMcp = JSON.parse(readFileSync(mcpJsonPath, 'utf-8'))
+      expect(parsedClaudeMcp.mcpServers.existing).toEqual({ command: 'node', args: ['x.js'] })
+      expect(parsedClaudeMcp.mcpServers.headroom).toEqual({ command: fakeHr, args: ['mcp', 'serve'] })
+      expect(statSync(mcpJsonPath).mode & 0o777).toBe(0o600)
+
+      // 2. Codex ~/.codex/config.toml (adds [mcp_servers.headroom] + forwards non-secret servers, strips API keys)
+      const codexWs = join(tmp, 'ws-codex')
+      mkdirSync(codexWs, { recursive: true })
+      writeFileSync(
+        join(codexWs, '.mcp.json'),
+        JSON.stringify({
+          mcpServers: {
+            memoryTool: {
+              command: 'npx',
+              args: ['-y', 'memory-mcp'],
+              env: { MEMORY_DIR: '/tmp/mem', ANTHROPIC_API_KEY: 'sk-ant-secret', CUSTOM_TOKEN: 'secret-tok' },
+            },
+          },
+        }),
+      )
+      expect(syncCliMcpConfig('codex', join(codexWs, '.mcp.json'), { env, homeDir: tmp })).toBe(true)
+      const codexToml = readFileSync(join(tmp, '.codex', 'config.toml'), 'utf-8')
+      expect(codexToml).toContain('[mcp_servers.headroom]')
+      expect(codexToml).toContain('args = ["mcp","serve"]')
+      expect(codexToml).toContain('[mcp_servers.memoryTool]')
+      expect(codexToml).toContain('MEMORY_DIR = "/tmp/mem"')
+      expect(codexToml).not.toContain('sk-ant-secret')
+      expect(codexToml).not.toContain('secret-tok')
+      expect(statSync(join(tmp, '.codex', 'config.toml')).mode & 0o777).toBe(0o600)
+
+      // 3. Antigravity ~/.gemini/antigravity/mcp_config.json
+      expect(syncCliMcpConfig('agy', join(codexWs, '.mcp.json'), { env, homeDir: tmp })).toBe(true)
+      const agyMcp = JSON.parse(readFileSync(join(tmp, '.gemini', 'antigravity', 'mcp_config.json'), 'utf-8'))
+      expect(agyMcp.mcpServers.headroom).toEqual({ command: fakeHr, args: ['mcp', 'serve'] })
+      expect(agyMcp.mcpServers.memoryTool.env).toEqual({ MEMORY_DIR: '/tmp/mem' })
+
+      // 4. Refuses symlinks on MCP targets
+      const evilTarget = join(tmp, 'evil.txt')
+      writeFileSync(evilTarget, 'untouched')
+      const symlinkMcp = join(tmp, 'symlink.mcp.json')
+      symlinkSync(evilTarget, symlinkMcp)
+      expect(syncCliMcpConfig('claude', symlinkMcp, { env, homeDir: tmp })).toBe(false)
+      expect(readFileSync(evilTarget, 'utf-8')).toBe('untouched')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('installs headroom in an isolated temp HOME using mock uv without modifying host paths', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const repoRoot = resolve(here, '..', '..')
+    const scriptPath = join(repoRoot, 'scripts', 'install-headroom.sh')
+    const tmp = mkdtempSync(join(tmpdir(), 'marveen-headroom-install-sandbox-'))
+    try {
+      const fakeHome = join(tmp, 'home')
+      const mockBin = join(tmp, 'mock-bin')
+      const logFile = join(tmp, 'uv-calls.log')
+      mkdirSync(fakeHome, { recursive: true })
+      mkdirSync(mockBin, { recursive: true })
+
+      const mockUv = join(mockBin, 'uv')
+      writeFileSync(
+        mockUv,
+        [
+          '#!/usr/bin/env bash',
+          `echo "$@" >> "${logFile}"`,
+          `mkdir -p "${fakeHome}/.local/bin"`,
+          `printf '#!/usr/bin/env bash\\necho "headroom 0.9.9-sandbox"\\n' > "${fakeHome}/.local/bin/headroom"`,
+          `chmod +x "${fakeHome}/.local/bin/headroom"`,
+          'exit 0',
+        ].join('\n') + '\n',
+      )
+      chmodSync(mockUv, 0o755)
+
+      // 1. Respects MARVEEN_HEADROOM=0 opt-out
+      execFileSync('bash', [scriptPath], {
+        env: { HOME: fakeHome, PATH: `${mockBin}:/usr/bin:/bin`, MARVEEN_HEADROOM: '0' },
+        encoding: 'utf-8',
+      })
+      expect(existsSync(join(fakeHome, '.local', 'bin', 'headroom'))).toBe(false)
+
+      // 2. Installs into fake HOME via mock uv without touching real user ~/.local
+      const out = execFileSync('bash', [scriptPath], {
+        env: { HOME: fakeHome, PATH: `${mockBin}:/usr/bin:/bin` },
+        encoding: 'utf-8',
+      })
+      expect(out).toContain('Headroom telepitve (uv)')
+      expect(readFileSync(logFile, 'utf-8')).toContain('tool install headroom-ai[all]')
+      expect(existsSync(join(fakeHome, '.local', 'bin', 'headroom'))).toBe(true)
+
+      // 3. Fallback to isolated Python venv when uv is unavailable
+      const venvHome = join(tmp, 'venv-home')
+      const venvDir = join(tmp, 'custom-venv')
+      const pyMockBin = join(tmp, 'py-only-bin')
+      const pipLog = join(tmp, 'pip-calls.log')
+      mkdirSync(venvHome, { recursive: true })
+      mkdirSync(pyMockBin, { recursive: true })
+      const fakePy = join(pyMockBin, 'python3')
+      writeFileSync(
+        fakePy,
+        [
+          '#!/usr/bin/env bash',
+          'if [ "$1" = "-c" ]; then exit 0; fi',
+          'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then',
+          '  target="$3"',
+          '  mkdir -p "$target/bin"',
+          '  printf "#!/usr/bin/env bash\\nexit 0\\n" > "$target/bin/python"',
+          '  cat > "$target/bin/pip" <<PIPEOF',
+          '#!/usr/bin/env bash',
+          `echo "\\$@" >> "${pipLog}"`,
+          'printf "#!/usr/bin/env bash\\necho headroom-venv\\n" > "$target/bin/headroom"',
+          'chmod +x "$target/bin/headroom"',
+          'exit 0',
+          'PIPEOF',
+          '  chmod +x "$target/bin/python" "$target/bin/pip"',
+          '  exit 0',
+          'fi',
+          'exit 1',
+        ].join('\n') + '\n',
+      )
+      chmodSync(fakePy, 0o755)
+      const venvOut = execFileSync('bash', [scriptPath], {
+        env: {
+          HOME: venvHome,
+          PATH: `${pyMockBin}:/usr/bin:/bin`,
+          PYTHON3_BIN: fakePy,
+          MARVEEN_HEADROOM_VENV: venvDir,
+        },
+        encoding: 'utf-8',
+      })
+      expect(venvOut).toContain('Headroom telepitve')
+      expect(readFileSync(pipLog, 'utf-8')).toContain('headroom-ai[all]')
+      expect(existsSync(join(venvHome, '.local', 'bin', 'headroom'))).toBe(true)
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }

@@ -1086,6 +1086,11 @@ if [ -f "$INSTALL_DIR/scripts/ensure-managed-channels-enabled.sh" ]; then
   bash "$INSTALL_DIR/scripts/ensure-managed-channels-enabled.sh" || true
 fi
 
+if [ -f "$INSTALL_DIR/scripts/install-headroom.sh" ]; then
+  echo -e "  Headroom AI (kontextus- es token-optimalizalas) telepitese..."
+  bash "$INSTALL_DIR/scripts/install-headroom.sh" || true
+fi
+
 # Linuxbrew (ha telepitve van)
 if [ -x "/home/linuxbrew/.linuxbrew/bin/brew" ]; then
   ensure_in_rc 'linuxbrew' 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv bash)"'

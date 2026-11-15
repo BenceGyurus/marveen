@@ -23,7 +23,7 @@ import { snapshotPersonaFile, writePersonaFileIfUnchanged } from '../persona-wri
 import { measureClaudeCliVersion } from '../claude-cli-version.js'
 import { launchableInstallDefault } from '../default-model-guard.js'
 import { claudeSupportForCli, CLAUDE_MODEL_MIN_CLI } from '../../claude-cli-support.js'
-import { getCliTypeForModel, getCodexAvailableModels, getAgyAvailableModels, detectAvailableClis, type CliType } from '../../cli-detector.js'
+import { getCliTypeForModel, getCodexAvailableModels, getAgyAvailableModels, detectAvailableClis, detectHeadroomInfo, type CliType } from '../../cli-detector.js'
 import { CHANNEL_PLUGIN_IDS } from '../plugin-ids.js'
 import { getSecret, setSecret, deleteSecret, listSecrets } from '../vault.js'
 import { loadOpenRouterCatalog, fetchAllOpenRouterModels, loadCuratedManual, addCuratedManual, removeCuratedManual } from '../openrouter-models.js'
@@ -972,6 +972,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       codex: getCodexAvailableModels(),
       agy: getAgyAvailableModels(),
       cliTools: detectAvailableClis(),
+      headroom: detectHeadroomInfo(),
     })
     return true
   }

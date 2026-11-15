@@ -38,8 +38,18 @@ export interface CliToolInfo {
 
 export interface CliModelEntry {
   id: string
+  rawId?: string
+  cli?: CliType
   label: string
   description?: string
+}
+
+export interface HeadroomToolInfo {
+  enabled: boolean
+  available: boolean
+  binPath: string | null
+  version: string | null
+  wrapTargets: CliType[]
 }
 
 export interface AltCliPaneState {
@@ -87,6 +97,7 @@ export interface CliProviderAdapter {
   readonly fallbackBinaryPaths?: readonly string[]
   readonly modelPrefixes: readonly string[]
   readonly instructionFiles: readonly string[]
+  readonly headroomWrapTarget?: string | null
   readonly supportsClaudeChannelsFlag: boolean
   readonly supportsSlashRename: boolean
   readonly supportsSlashClear: boolean
@@ -133,11 +144,302 @@ export function recordKnownModelForCli(cli: CliType, modelId: string): void {
     set = new Set<string>()
     knownModelIdsByCli.set(cli, set)
   }
-  set.add(clean)
+  const stripped = clean.replace(/^(?:claude|codex|openai|agy|antigravity):/, '')
+  set.add(`${cli}:${stripped}`)
+  // Never let a non-Claude CLI claim an unprefixed `claude-*` model ID unless it carries an
+  // Antigravity tier suffix (`-low`, `-medium`, `-high`, `-xhigh`), so e.g. `claude-opus-4-6`
+  // remains unambiguously routed to Claude Code (`claude`) unless prefixed as `agy:claude-opus-4-6`.
+  const isAmbiguousClaudeId =
+    cli !== 'claude' &&
+    stripped.startsWith('claude-') &&
+    !/^claude-(?:opus|sonnet|haiku)-[\w.-]+-(?:low|medium|high|xhigh)$/.test(stripped)
+  if (!isAmbiguousClaudeId) {
+    set.add(stripped)
+  }
 }
 
 export function isKnownModelForCli(cli: CliType, lowerModelId: string): boolean {
   return knownModelIdsByCli.get(cli)?.has(lowerModelId) ?? false
+}
+
+// ============================================================================
+// Headroom Optimizer (`https://github.com/headroomlabs-ai/headroom`) Integration
+// ============================================================================
+
+export function isHeadroomEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env.MARVEEN_HEADROOM ?? '').trim().toLowerCase()
+  if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'no') return false
+  return true
+}
+
+export function resolveHeadroomBinary(opts: { env?: NodeJS.ProcessEnv; homeDir?: string } = {}): string | null {
+  const env = opts.env ?? process.env
+  if (!isHeadroomEnabled(env)) return null
+
+  const explicit = (env.MARVEEN_HEADROOM_BIN ?? env.HEADROOM_BIN ?? '').trim()
+  if (explicit) {
+    try {
+      if (existsSync(explicit) && statSync(explicit).isFile()) return explicit
+    } catch { /* ignore */ }
+    return null
+  }
+
+  // Keep unit tests hermetic unless MARVEEN_HEADROOM_BIN or homeDir is explicitly provided
+  if (env.VITEST && !opts.homeDir) return null
+
+  const home = opts.homeDir || homedir()
+  const candidates = [
+    join(home, '.local', 'bin', 'headroom'),
+    join(home, '.local', 'share', 'marveen-headroom-venv', 'bin', 'headroom'),
+    ...(env.FLEET_PYTHON_VENV ? [join(env.FLEET_PYTHON_VENV, 'bin', 'headroom')] : []),
+  ]
+  for (const c of candidates) {
+    try {
+      if (existsSync(c) && statSync(c).isFile()) return c
+    } catch { /* ignore */ }
+  }
+
+  if (!opts.homeDir) {
+    const fromPath = tryResolveFromPath('headroom')
+    if (fromPath) return fromPath
+  }
+  return null
+}
+
+const headroomWrapProbeCache = new Map<string, Set<string>>()
+
+function probeHeadroomWrapTargets(headroomBin: string): Set<string> {
+  const cached = headroomWrapProbeCache.get(headroomBin)
+  if (cached) return cached
+  const targets = new Set<string>(['claude', 'codex'])
+  try {
+    const out = execFileSync(headroomBin, ['wrap', '--help'], {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).toLowerCase()
+    if (/\bagy\b/.test(out)) targets.add('agy')
+    if (/\bantigravity\b/.test(out)) targets.add('antigravity')
+  } catch { /* ignore */ }
+  headroomWrapProbeCache.set(headroomBin, targets)
+  return targets
+}
+
+function quoteShellPathIfNeeded(p: string): string {
+  if (/^[a-zA-Z0-9._/-]+$/.test(p)) return p
+  return `'${p.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * Return the CLI launch prefix for `cliType`, automatically wrapping with
+ * `headroom wrap <target> --` when Headroom is installed and supports the target CLI.
+ * Falls back transparently to `rawCliBin` when Headroom is absent or disabled.
+ */
+export function resolveHeadroomLauncher(
+  cliType: CliType,
+  rawCliBin: string,
+  opts: { hasCustomBaseUrl?: boolean; env?: NodeJS.ProcessEnv; homeDir?: string } = {},
+): string {
+  const env = opts.env ?? process.env
+  const headroomBin = resolveHeadroomBinary(opts)
+  if (!headroomBin) return rawCliBin
+
+  // When a custom ANTHROPIC_BASE_URL is already injected (e.g. Ollama / OpenRouter / custom provider),
+  // avoid overriding ANTHROPIC_BASE_URL with Headroom's local proxy unless explicitly forced.
+  if (cliType === 'claude' && opts.hasCustomBaseUrl && env.MARVEEN_HEADROOM_WRAP_CUSTOM_URL !== '1') {
+    return rawCliBin
+  }
+
+  const provider = providerRegistry.get(cliType)
+  let target = provider?.headroomWrapTarget ?? null
+  if (!target && cliType === 'agy') {
+    if (env.MARVEEN_HEADROOM_WRAP_AGY === '1') {
+      target = 'agy'
+    } else {
+      const supported = probeHeadroomWrapTargets(headroomBin)
+      if (supported.has('agy')) target = 'agy'
+      else if (supported.has('antigravity')) target = 'antigravity'
+    }
+  }
+
+  if (!target || !/^[a-zA-Z0-9_-]+$/.test(target)) return rawCliBin
+  return `${quoteShellPathIfNeeded(headroomBin)} wrap ${target} --`
+}
+
+export function detectHeadroomInfo(opts: { env?: NodeJS.ProcessEnv; homeDir?: string } = {}): HeadroomToolInfo {
+  const env = opts.env ?? process.env
+  const enabled = isHeadroomEnabled(env)
+  const binPath = resolveHeadroomBinary(opts)
+  if (!binPath) {
+    return { enabled, available: false, binPath: null, version: null, wrapTargets: [] }
+  }
+  let version: string | null = null
+  try {
+    const out = execFileSync(binPath, ['--version'], {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    version = out.split('\n')[0]?.trim() || null
+  } catch { /* ignore */ }
+  const targets = probeHeadroomWrapTargets(binPath)
+  const wrapTargets: CliType[] = ['claude', 'codex']
+  if (targets.has('agy') || targets.has('antigravity') || env.MARVEEN_HEADROOM_WRAP_AGY === '1') {
+    wrapTargets.push('agy')
+  }
+  return { enabled, available: true, binPath, version, wrapTargets }
+}
+
+const SENSITIVE_MCP_ENV_KEY_RX = /(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|PRIVATE)/i
+
+interface SafeStdioMcpServer {
+  command: string
+  args: string[]
+  env?: Record<string, string>
+}
+
+function readSafeStdioMcpServers(mcpJsonPath?: string): Record<string, SafeStdioMcpServer> {
+  const out: Record<string, SafeStdioMcpServer> = {}
+  if (!mcpJsonPath || !existsSync(mcpJsonPath)) return out
+  try {
+    if (lstatSync(mcpJsonPath).isSymbolicLink()) return out
+    const raw = JSON.parse(readFileSync(mcpJsonPath, 'utf-8')) as { mcpServers?: Record<string, unknown> }
+    if (!raw?.mcpServers || typeof raw.mcpServers !== 'object') return out
+    for (const [name, def] of Object.entries(raw.mcpServers)) {
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name) || !def || typeof def !== 'object') continue
+      const srv = def as Record<string, unknown>
+      if (typeof srv.command !== 'string' || !srv.command.trim()) continue
+      const args = Array.isArray(srv.args) ? srv.args.filter((a): a is string => typeof a === 'string') : []
+      const safeEnv: Record<string, string> = {}
+      if (srv.env && typeof srv.env === 'object') {
+        for (const [k, v] of Object.entries(srv.env as Record<string, unknown>)) {
+          if (typeof v === 'string' && !SENSITIVE_MCP_ENV_KEY_RX.test(k) && !/[\r\n\0]/.test(v)) {
+            safeEnv[k] = v
+          }
+        }
+      }
+      out[name] = {
+        command: srv.command.trim(),
+        args,
+        ...(Object.keys(safeEnv).length > 0 ? { env: safeEnv } : {}),
+      }
+    }
+  } catch { /* ignore */ }
+  return out
+}
+
+/**
+ * Synchronize MCP servers from an agent's `.mcp.json` AND automatically register
+ * the Headroom MCP server (`headroom mcp serve`) when Headroom is installed,
+ * covering `claude`, `codex`, and `agy`.
+ */
+export function syncCliMcpConfig(
+  cliType: CliType,
+  mcpJsonPath?: string,
+  opts: { homeDir?: string; env?: NodeJS.ProcessEnv } = {},
+): boolean {
+  const env = opts.env ?? process.env
+  if (env.VITEST && !opts.homeDir && !env.MARVEEN_HEADROOM_BIN) return false
+  const home = opts.homeDir || homedir()
+  const headroomBin = resolveHeadroomBinary({ env, homeDir: opts.homeDir })
+
+  try {
+    if (cliType === 'claude') {
+      if (!headroomBin || !mcpJsonPath || !existsSync(mcpJsonPath)) return false
+      if (lstatSync(mcpJsonPath).isSymbolicLink()) return false
+      const data = JSON.parse(readFileSync(mcpJsonPath, 'utf-8')) as Record<string, unknown>
+      const mcpServers =
+        data.mcpServers && typeof data.mcpServers === 'object' && !Array.isArray(data.mcpServers)
+          ? (data.mcpServers as Record<string, unknown>)
+          : {}
+      const existing = mcpServers.headroom as { command?: unknown; args?: unknown } | undefined
+      if (
+        existing &&
+        existing.command === headroomBin &&
+        Array.isArray(existing.args) &&
+        existing.args[0] === 'mcp' &&
+        existing.args[1] === 'serve'
+      ) {
+        return false
+      }
+      mcpServers.headroom = { command: headroomBin, args: ['mcp', 'serve'] }
+      data.mcpServers = mcpServers
+      writeFileSync(mcpJsonPath, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
+      try { chmodSync(mcpJsonPath, 0o600) } catch { /* ignore */ }
+      return true
+    }
+
+    const servers = readSafeStdioMcpServers(mcpJsonPath)
+    if (headroomBin) {
+      servers.headroom = { command: headroomBin, args: ['mcp', 'serve'] }
+    }
+    if (Object.keys(servers).length === 0) return false
+
+    if (cliType === 'codex') {
+      const configPath = join(home, '.codex', 'config.toml')
+      mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 })
+      if (existsSync(configPath) && lstatSync(configPath).isSymbolicLink()) return false
+      let content = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : ''
+      let changed = false
+      for (const [name, srv] of Object.entries(servers)) {
+        const header = `[mcp_servers.${name}]`
+        if (!content.includes(header)) {
+          if (content.length > 0 && !content.endsWith('\n')) content += '\n'
+          content += `\n${header}\ncommand = ${JSON.stringify(srv.command)}\nargs = ${JSON.stringify(srv.args)}\n`
+          if (srv.env && Object.keys(srv.env).length > 0) {
+            content += `[mcp_servers.${name}.env]\n`
+            for (const [k, v] of Object.entries(srv.env)) {
+              if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k)) {
+                content += `${k} = ${JSON.stringify(v)}\n`
+              }
+            }
+          }
+          changed = true
+        }
+      }
+      if (changed) {
+        writeFileSync(configPath, content, { mode: 0o600 })
+        try { chmodSync(configPath, 0o600) } catch { /* ignore */ }
+      }
+      return changed
+    }
+
+    if (cliType === 'agy') {
+      const configPath = join(home, '.gemini', 'antigravity', 'mcp_config.json')
+      mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 })
+      if (existsSync(configPath) && lstatSync(configPath).isSymbolicLink()) return false
+      let data: Record<string, unknown> = {}
+      if (existsSync(configPath)) {
+        try {
+          data = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
+        } catch {
+          data = {}
+        }
+      }
+      const mcpServers =
+        data.mcpServers && typeof data.mcpServers === 'object' && !Array.isArray(data.mcpServers)
+          ? (data.mcpServers as Record<string, unknown>)
+          : {}
+      let changed = false
+      for (const [name, srv] of Object.entries(servers)) {
+        const prev = JSON.stringify(mcpServers[name])
+        const next = JSON.stringify(srv)
+        if (prev !== next) {
+          mcpServers[name] = srv
+          changed = true
+        }
+      }
+      if (changed) {
+        data.mcpServers = mcpServers
+        writeFileSync(configPath, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
+        try { chmodSync(configPath, 0o600) } catch { /* ignore */ }
+      }
+      return changed
+    }
+  } catch {
+    return false
+  }
+  return false
 }
 
 // --- Shared workspace helper ---
@@ -180,6 +482,7 @@ const claudeAdapter: CliProviderAdapter = {
   binaryName: 'claude',
   modelPrefixes: ['claude:'],
   instructionFiles: ['CLAUDE.md'],
+  headroomWrapTarget: 'claude',
   supportsClaudeChannelsFlag: true,
   supportsSlashRename: true,
   supportsSlashClear: true,
@@ -247,12 +550,15 @@ export function getCodexAvailableModels(opts: { codexHome?: string; forceRefresh
   const result: CliModelEntry[] = []
 
   const addEntry = (id: string, displayName?: string, description?: string) => {
-    const cleanId = id.trim()
+    const cleanId = id.trim().replace(/^(?:codex|openai):/i, '')
     if (!cleanId || !SAFE_MODEL_ID_RX.test(cleanId) || seen.has(cleanId)) return
     seen.add(cleanId)
     recordKnownModelForCli('codex', cleanId)
+    const prefixedId = `codex:${cleanId}`
     result.push({
-      id: cleanId,
+      id: prefixedId,
+      rawId: cleanId,
+      cli: 'codex',
       label: `${(displayName || cleanId).trim()} (Codex)`,
       ...(description ? { description } : {}),
     })
@@ -321,6 +627,7 @@ const codexAdapter: CliProviderAdapter = {
   fallbackBinaryPaths: [CHATGPT_APP_CODEX_BIN],
   modelPrefixes: ['codex:', 'openai:'],
   instructionFiles: ['AGENTS.md'],
+  headroomWrapTarget: 'codex',
   supportsClaudeChannelsFlag: false,
   supportsSlashRename: false,
   supportsSlashClear: false,
@@ -482,19 +789,24 @@ export function parseAgyModelsOutput(stdout: string): CliModelEntry[] {
   const parsed: CliModelEntry[] = []
   const seen = new Set<string>()
   const add = (rawId: string, rawName: string) => {
-    const id = rawId.trim()
+    const cleanId = rawId.trim().replace(/^(?:agy|antigravity):/i, '')
     const name = rawName.trim()
-    if (!id || !name || !SAFE_MODEL_ID_RX.test(id) || seen.has(id)) return
-    seen.add(id)
-    recordKnownModelForCli('agy', id)
+    if (!cleanId || !name || !SAFE_MODEL_ID_RX.test(cleanId) || seen.has(cleanId)) return
+    seen.add(cleanId)
+    recordKnownModelForCli('agy', cleanId)
+    const prefixedId = `agy:${cleanId}`
     parsed.push({
-      id,
+      id: prefixedId,
+      rawId: cleanId,
+      cli: 'agy',
       label: `${name} (Antigravity)`,
     })
   }
-  for (const line of stdout.split('\n')) {
-    const tabMatch = /^\s*([a-zA-Z0-9][a-zA-Z0-9._:-]*)\t+(.+?)\s*$/.exec(line)
-    if (tabMatch) {
+  for (const rawLine of stdout.split('\n')) {
+    // Strip carriage-return spinner frames if stdout came from a PTY
+    const line = rawLine.includes('\r') ? rawLine.split('\r').filter(Boolean).pop() ?? '' : rawLine
+    const tabMatch = /^\s*([a-zA-Z0-9][a-zA-Z0-9._:-]*)(?:\t+|\s{2,})(.+?)\s*$/.exec(line)
+    if (tabMatch && !/^fetching\b/i.test(tabMatch[1]!)) {
       add(tabMatch[1]!, tabMatch[2]!)
       continue
     }
@@ -579,11 +891,12 @@ export function getAgyAvailableModels(
     if (existsSync(settingsFile)) {
       const s = JSON.parse(readFileSync(settingsFile, 'utf-8')) as { model?: unknown }
       if (typeof s.model === 'string' && s.model.trim()) {
-        const id = s.model.trim()
-        if (SAFE_MODEL_ID_RX.test(id)) {
-          recordKnownModelForCli('agy', id)
-          if (!parsed.some(m => m.id === id)) {
-            parsed.unshift({ id, label: `${id} (Antigravity)` })
+        const cleanId = s.model.trim().replace(/^(?:agy|antigravity):/i, '')
+        if (SAFE_MODEL_ID_RX.test(cleanId)) {
+          recordKnownModelForCli('agy', cleanId)
+          const prefixedId = `agy:${cleanId}`
+          if (!parsed.some(m => m.id === prefixedId || m.rawId === cleanId)) {
+            parsed.unshift({ id: prefixedId, rawId: cleanId, cli: 'agy', label: `${cleanId} (Antigravity)` })
           }
         }
       }
@@ -600,8 +913,15 @@ const agyAdapter: CliProviderAdapter = {
   id: 'agy',
   displayName: 'Antigravity (Google)',
   binaryName: 'agy',
+  fallbackBinaryPaths: [
+    '/opt/homebrew/bin/agy',
+    '/usr/local/bin/agy',
+    join(homedir(), '.local', 'bin', 'agy'),
+    join(homedir(), '.antigravity', 'antigravity', 'bin', 'agy'),
+  ],
   modelPrefixes: ['agy:', 'antigravity:'],
   instructionFiles: ['GEMINI.md', 'AGENTS.md'],
+  headroomWrapTarget: null,
   supportsClaudeChannelsFlag: false,
   supportsSlashRename: false,
   supportsSlashClear: false,

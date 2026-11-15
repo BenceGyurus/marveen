@@ -2,7 +2,7 @@ import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, 
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { encodeClaudeProjectDir } from '../claude-project-dir.js'
-import { getCliProvider, listNonClaudeCliProviders, type CliType } from '../cli-detector.js'
+import { getCliProvider, listNonClaudeCliProviders, formatCliModelId, type CliType } from '../cli-detector.js'
 
 /**
  * Locate the newest non-Claude CLI (`agy`, `codex`, or any registered provider)
@@ -57,7 +57,7 @@ export function readAltCliActiveModel(workingDir: string, sinceUnixSec?: number,
           const lineUnix = Math.floor(parsed.tsMs / 1000)
           if (lineUnix < sinceUnixSec) continue
         }
-        return parsed.model
+        return formatCliModelId(alt.cli, parsed.model) || parsed.model
       } catch { /* skip */ }
     }
   } catch { /* ignore */ }
@@ -265,7 +265,7 @@ export function readLastAssistantModel(workingDir: string, configDir?: string, h
         try {
           const parsed = provider.parseTranscriptLine(JSON.parse(line) as Record<string, unknown>)
           if (parsed.model && parsed.tsMs !== null) {
-            return { model: parsed.model, atMs: parsed.tsMs }
+            return { model: formatCliModelId(alt.cli, parsed.model) || parsed.model, atMs: parsed.tsMs }
           }
         } catch { /* skip */ }
       }

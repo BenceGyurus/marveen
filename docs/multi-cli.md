@@ -51,10 +51,11 @@ A `getCliTypeForModel(model)` függvény az alábbi sorrendben választja ki a m
 A `GET /api/models/available` végpont (valamint a Dashboard modellválasztója) semmilyen statikus `codex` vagy `agy` modell-listát nem tartalmaz:
 
 - **Codex (`getCodexAvailableModels`):**
-  - Beolvassa a `$CODEX_HOME/models_cache*.json` (alapértelmezetten `~/.codex/models_cache.json`) fájlokat, és kiszűri a `visibility === 'list'` modelleket.
+  - Beolvassa a `$CODEX_HOME/models_cache*.json` (alapértelmezetten `~/.codex/models_cache.json`) fájlokat, kiszűri a `visibility === 'list'` modelleket, és kanonikus **`codex:<model>`** azonosítóval regisztrálja őket (`rawId` + `cli: 'codex'` metaadattal).
   - Emellett ellenőrzi a `~/.codex/config.toml` fájlban beállított alapértelmezett `model = "..."` értéket.
 - **Antigravity (`getAgyAvailableModels`):**
-  - Meghívja az `agy models` parancsot (`execFileSync`), és feldolgozza mind a nem-TTY tabulátoros (`<id>\t<Display Name>`), mind a TTY felsorolásos (`• <Display Name> (<id>)`) kimenetet.
+  - Meghívja az `agy models` parancsot (`execFileSync`), és feldolgozza a TTY `\r` spinner-sorok megtisztítása után a többszóközös/tabulátoros (`<id>   <Display Name>`) és a felsorolásos (`• <Display Name> (<id>)`) kimenetet is.
+  - Kanonikus **`agy:<model>`** azonosítót állít elő, így az Antigravity által is kínált átfedő modellek (pl. `agy:claude-opus-5-5-high` vs natív `claude-opus-4-6`, vagy `agy:gpt-oss-120b-medium` vs `codex:gpt-5.4`) ütközésmentesen elkülönülnek a kártyákon (`Antigravity · ...`, `Codex · ...`) és a modellválasztóban.
   - Kiegészítésként beolvassa a `~/.gemini/antigravity-cli/settings.json` `model` mezőjét is.
 
 ### 3. Munkakönyvtár-előkészítés és Workspace Trust (`prepareWorkspaceForCli`)
@@ -99,3 +100,15 @@ A Marveen a tmux-panel szöveges tartalmát (`capture-pane`) elemzi, hogy tudja,
    - Ha egy ügynök vagy worker `codex` vagy `agy` modellel indul, a rendszer kiüríti az egyéni Anthropic provider változókat, és a shellben kifejezetten törli (`unset`) a `CLAUDE_CODE_OAUTH_TOKEN` és `ANTHROPIC_API_KEY` környezeti változókat helyi, worker és távoli SSH indításnál egyaránt.
 5. **Szigorú profil (`permissionMode === 'strict'`) tiszteletben tartása:**
    - Ha az ügynök biztonsági profilja `strict`, a `codex` nem kapja meg a `--dangerously-bypass-approvals-and-sandbox` kapcsolót (helyette `--sandbox workspace-write` módban fut), az `agy` pedig nem kapja meg a `--dangerously-skip-permissions` zászlót.
+
+---
+
+## ⚡ Automatikus Headroom AI optimalizálás
+
+A Marveen natívan integrálja a [Headroom](https://github.com/headroomlabs-ai/headroom) kontextus- és token-optimalizáló réteget mindhárom CLI-hez (`claude`, `codex`, `agy`):
+
+- **Automatikus telepítés (`scripts/install-headroom.sh`):** A `install-macos.sh`, `install-linux.sh` és `update.sh` automatikusan telepíti/frissíti a `headroom-ai` csomagot (`uv tool install` előnyben részesítve, ennek hiányában izolált Python ≥ 3.10 venv `~/.local/share/marveen-headroom-venv` alatt `~/.local/bin/headroom` szimlinkkel). Kikapcsolható a `MARVEEN_HEADROOM=0` környezeti változóval.
+- **Transzparens indítási csomagolás (`headroom wrap`):** Ha a `headroom` elérhető a gépen, a fő munkamenet (`scripts/channels.sh`), a helyi alügynökök (`agent-process.ts`) és a háttér-workerek (`agent-worker.ts`) automatikusan `headroom wrap <cli> --` parancson keresztül indulnak (kivéve `claude` egyéni OpenRouter/DeepSeek `ANTHROPIC_BASE_URL` esetén, hogy a külső végpont ne ütközzön).
+- **MCP regisztráció (`headroom mcp serve`):** A `prepareWorkspaceForCli` és a worker indítás automatikusan regisztrálja a `headroom mcp serve` MCP-szervert a megfelelő konfigurációba (`claude`: `.mcp.json`, `codex`: `~/.codex/config.toml` `[mcp_servers.headroom]`, `agy`: `~/.gemini/antigravity/mcp_config.json`) szimlink-védelemmel, `0o600` jogosultsággal és az API-kulcsokat / tokeneket kiszűrő `env` másolással.
+- **Folyamatkövetés (`liveness.ts` & `channels.sh`):** A watchdog és a channel monitor a `headroom` wrapper folyamaton keresztül is automatikusan megtalálja az alatta futó `claude`/`codex`/`agy` gyermekfolyamatot.
+- **Diagnosztika (`GET /api/models/available`):** A válasz `headroom` objektumban (`available`, `enabled`, `binPath`, `version`, `wrapTargets`) jelzi a Headroom állapotát.

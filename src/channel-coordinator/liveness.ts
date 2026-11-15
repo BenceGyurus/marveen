@@ -48,6 +48,32 @@ export function getClaudePidForSession(session: string): number | null {
         if (child) return parseInt(child.split('\n')[0], 10)
       } catch { /* none */ }
     }
+    // Walk descendants (e.g. headroom wrap -> python -> claude/codex)
+    try {
+      const psAll = execFileSync('/bin/ps', ['-eo', 'pid=,ppid=,comm='], { timeout: 3000, encoding: 'utf-8' })
+      const childrenOf = new Map<number, number[]>()
+      const commOf = new Map<number, string>()
+      for (const line of psAll.split('\n')) {
+        const m = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line)
+        if (!m) continue
+        const p = parseInt(m[1]!, 10)
+        const pp = parseInt(m[2]!, 10)
+        commOf.set(p, m[3]!.trim())
+        const arr = childrenOf.get(pp) || []
+        arr.push(p)
+        childrenOf.set(pp, arr)
+      }
+      const queue = [...(childrenOf.get(panePid) || [])]
+      const seen = new Set<number>([panePid])
+      while (queue.length > 0) {
+        const cur = queue.shift()!
+        if (seen.has(cur)) continue
+        seen.add(cur)
+        const c = commOf.get(cur) || ''
+        if (/(?:^|\/)(?:claude|codex|agy)$/.test(c)) return cur
+        for (const k of (childrenOf.get(cur) || [])) queue.push(k)
+      }
+    } catch { /* ignore */ }
     try {
       const child = execFileSync('/usr/bin/pgrep', ['-P', String(panePid), '-f', '(?:^|/)(?:claude|codex|agy)(?:\\s|$)'], { timeout: 3000, encoding: 'utf-8' }).trim()
       if (child) return parseInt(child.split('\n')[0], 10)

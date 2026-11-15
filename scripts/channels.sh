@@ -1933,6 +1933,22 @@ esac
 # the server's global environment, so every sub-agent session inherited the
 # MAIN session's channel state dir. The -g -u after the launch cleans a server
 # polluted earlier.
+# Headroom context optimizer wrapper (`headroom wrap claude --`) when installed, enabled, and not using a custom base URL.
+case "${MARVEEN_HEADROOM:-1}" in
+  0|false|FALSE|off|OFF|no|NO) ;;
+  *)
+    if [ -z "$CUSTOM_PROVIDER_ENV" ] && ! printf '%s' "$MAIN_MODEL" | grep -qE '/|^deepseek-|^minimax-'; then
+      _hr_bin="$(command -v headroom 2>/dev/null || true)"
+      [ -z "$_hr_bin" ] && [ -x "$HOME/.local/bin/headroom" ] && _hr_bin="$HOME/.local/bin/headroom"
+      [ -z "$_hr_bin" ] && [ -x "$HOME/.local/share/marveen-headroom-venv/bin/headroom" ] && _hr_bin="$HOME/.local/share/marveen-headroom-venv/bin/headroom"
+      if [ -n "$_hr_bin" ]; then
+        CLAUDE="$(sh_single_quote "$_hr_bin") wrap claude --"
+      fi
+      unset _hr_bin
+    fi
+    ;;
+esac
+
 env -u "$STATE_ENV_VAR" $_AKM_ENV_UNSET $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
   "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${AUTH_POST_ENV}${CUSTOM_PROVIDER_ENV}${GROMZO_ENV}$CLAUDE --dangerously-skip-permissions${EXTRA_SETTINGS_FLAG} ${MODEL_FLAG}${CHANNELS_ARG}"
 # The server certainly exists now: see CHANNELSAUTHRACE923 above.
@@ -2152,10 +2168,18 @@ date +%s > "$INSTALL_DIR/store/.channel-last-respawn"
 # is a Node (tsx) child whose argv names its slack-channel plugin root, and a bun-only check never finds it.
 plugin_child_pid() {
   [ -n "$1" ] || return 0
-  case "$CHANNEL_PROVIDER" in
-    slack) /usr/bin/pgrep -P "$1" -f '/slack-channel/' 2>/dev/null | head -1 ;;
-    *)     /usr/bin/pgrep -P "$1" bun 2>/dev/null | head -1 ;;
-  esac
+  local _pids _p _hit
+  _pids="$1 $(/usr/bin/pgrep -P "$1" 2>/dev/null || true)"
+  for _p in $_pids; do
+    case "$CHANNEL_PROVIDER" in
+      slack) _hit="$(/usr/bin/pgrep -P "$_p" -f '/slack-channel/' 2>/dev/null | head -1)" ;;
+      *)     _hit="$(/usr/bin/pgrep -P "$_p" bun 2>/dev/null | head -1)" ;;
+    esac
+    if [ -n "$_hit" ]; then
+      printf '%s\n' "$_hit"
+      return 0
+    fi
+  done
 }
 (
   # GROMZONOPROVIDER1108: the Gromzo plugin runs on Node and is never in a "failed" /mcp row this unlock handles.
@@ -2491,7 +2515,7 @@ respawn_log() {
 # amugy is kileptet ha a session eltunik). A ${SESSION}-hoz tartozo claude
 # process pid-je -- ugyanaz a lekerdezes mint a post-init unlock Check 1-e
 # feljebb.
-_watchdog_claude_pid="$($TMUX list-panes -t "=$SESSION:" -F '#{pane_pid}' 2>/dev/null | head -1)"
+_watchdog_claude_pid="$({ _p="$($TMUX list-panes -t "=$SESSION:" -F '#{pane_pid}' 2>/dev/null | head -1)"; _c="$([ -n "$_p" ] && /usr/bin/pgrep -P "$_p" -x claude 2>/dev/null | head -1)"; printf '%s' "${_c:-$_p}"; })"
 
 # Várakozás amíg a session él
 while $TMUX has-session -t "=$SESSION:" 2>/dev/null; do
@@ -2514,7 +2538,12 @@ while $TMUX has-session -t "=$SESSION:" 2>/dev/null; do
   # a pane respawn (-k), which gives the pane a NEW pid while this session and loop
   # live on. Re-read it every tick, or our own fresh plugin reads as foreign.
   _pane_pid_now="$($TMUX list-panes -t "=$SESSION:" -F '#{pane_pid}' 2>/dev/null | head -1)"
-  [ -n "$_pane_pid_now" ] && _watchdog_claude_pid="$_pane_pid_now"
+  if [ -n "$_pane_pid_now" ]; then
+    _child_claude_now="$(/usr/bin/pgrep -P "$_pane_pid_now" -x claude 2>/dev/null | head -1)"
+    [ -n "$_child_claude_now" ] && _pane_pid_now="$_child_claude_now"
+    unset _child_claude_now
+    _watchdog_claude_pid="$_pane_pid_now"
+  fi
   unset _pane_pid_now
   # GROMZONOPROVIDER1108: a gromzo-pending session is not a plugin that failed to start: no never-started budget,
   # a readiness poll every 60 s, and one restart when the main agent can take its Gromzo channel.
