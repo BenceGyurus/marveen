@@ -23711,7 +23711,7 @@ function gromzoScheduleStatusRefresh(isConnected, reload, setT) {
           `box-sizing:border-box`,
           `cursor:pointer`,
           `z-index:2`,
-          isOverdue ? 'background-image:repeating-linear-gradient(45deg,rgba(0,0,0,.12) 0px,rgba(0,0,0,.12) 4px,transparent 4px,transparent 8px)' : '',
+          isOverdue ? 'outline:1px solid var(--danger);outline-offset:-1px' : '',
         ].filter(Boolean).join(';')
         bar.title = `${seqLabel} ${card.title}\n${fmtDateShort(new Date(barStartMs))} - ${fmtDateShort(new Date(barEndMs))}`
         bar.textContent = `${seqLabel} ${card.title}`

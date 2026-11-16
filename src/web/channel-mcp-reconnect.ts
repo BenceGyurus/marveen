@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { resolveFromPath } from '../platform.js'
+import { makeLazyBinResolver } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, CHANNEL_PROVIDER } from '../config.js'
 import { readAgentChannelProvider } from './agent-config.js'
@@ -27,7 +27,7 @@ import {
   showsReconnectingPanel,
 } from './mcp-inline-command.js'
 
-const TMUX = resolveFromPath('tmux')
+const tmuxBin = makeLazyBinResolver('tmux')
 
 // A reconnect settles in a few seconds (busy spinner, "Reconnecting" panel,
 // then the result line); poll once a second for up to this many seconds.
@@ -75,7 +75,7 @@ function typeReconnectWithOneRetry(agentName: string, session: string, serverNam
 function dismissMcpMenu(session: string, opts: { stopWhenMenuClosed?: boolean } = {}): void {
   for (let i = 0; i < 4; i++) {
     try {
-      execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(session), 'Escape'], { timeout: 3000 })
+      execFileSync(tmuxBin(), ['send-keys', '-t', exactTmuxTarget(session), 'Escape'], { timeout: 3000 })
       execFileSync('/bin/sleep', ['0.4'], { timeout: 1000 })
     } catch {
       return
@@ -208,9 +208,9 @@ function typeMcpCommandAndWait(
   if (detectPaneState(before) === 'busy') return DEFER_BUSY
   if (!isIdle(session, before)) return DEFER_PARKED
   const baseline = countMcpCommandEchoes(before, action, serverName)
-  execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(session), '-l', `/mcp ${action} ${serverName}`], { timeout: 3000 })
+  execFileSync(tmuxBin(), ['send-keys', '-t', exactTmuxTarget(session), '-l', `/mcp ${action} ${serverName}`], { timeout: 3000 })
   execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 })
-  execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 3000 })
+  execFileSync(tmuxBin(), ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 3000 })
   // A grown echo count whose reply could not be claimed (not rendered yet, or
   // not the latest exchange) makes a later timeout ambiguous, like an older
   // echo on screen does.

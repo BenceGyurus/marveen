@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync
 import { join, dirname } from 'node:path'
 import { homedir, tmpdir, userInfo } from 'node:os'
 import { createHash } from 'node:crypto'
-import { resolveFromPath, tryResolveFromPath } from '../platform.js'
+import { makeLazyBinResolver, resolveFromPath, tryResolveFromPath } from '../platform.js'
 import { getCliTypeForModel, getCliProvider, stripCliModelPrefix, resolveHeadroomLauncher, resolveCliBinary, stampAgyWorkspaceTrust, stampCodexWorkspaceTrust, syncCliMcpConfig } from '../cli-detector.js'
 import { logger } from '../logger.js'
 import { launchableInstallDefaultSync, launchableDistributionDefaultSync } from './default-model-guard.js'
@@ -29,6 +29,7 @@ import { ROOT_SANDBOX_ENV } from './root-sandbox-env.js'
 import { shouldRunBackgroundServices, ALLOW_SECOND_INSTANCE_SERVICES_KEY } from './hook-registration-guard.js'
 import { exactTmuxTarget } from '../tmux-target.js'
 import { injectDbWriteGate, injectEmailSendGate, pythonHookCommand, isUnsafeHookCommand, EMAIL_GATE_MATCHER } from './agent-scaffold.js'
+import { runHeadlessWorkerTurn, shouldUseHeadlessMode } from './headless-runner.js'
 
 // =============================================================================
 // Interactive-tmux agent worker (jun.15 subscription migration).
@@ -52,7 +53,7 @@ import { injectDbWriteGate, injectEmailSendGate, pythonHookCommand, isUnsafeHook
 // answer to <reqid>.out and signal with <reqid>.done; runAgent polls the files.
 // =============================================================================
 
-const TMUX = resolveFromPath('tmux')
+const tmuxBin = makeLazyBinResolver('tmux')
 
 // MARVEEN_WORKER_MODEL is an escape hatch (systemd `Environment=`); when set it
 // wins over everything else. Without it the worker inherits the main agent's
@@ -985,7 +986,7 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
         : `${claudeCmd} --dangerously-skip-permissions --model ${shArg(workerModel)} ` +
           // WORKERMCPSEND1104 part 2: only the servers in the worker's own MCP config, nothing from any other source.
           `--strict-mcp-config --mcp-config ${shArg(workerMcpConfigPath(ctx))}`)
-  execFileSync(TMUX, ['new-session', '-d', '-s', ctx.session, '-c', ctx.home, 'bash', '-lc', launch], { timeout: 8000 })
+  execFileSync(tmuxBin(), ['new-session', '-d', '-s', ctx.session, '-c', ctx.home, 'bash', '-lc', launch], { timeout: 8000 })
   logger.info({ session: ctx.session, cwd: ctx.home }, 'agent-worker: launched interactive worker session')
   // APRO920 (c)(2): same rationale as startAgentProcess's model-resolved log --
   // which config-chain element supplied the --model value.
@@ -1068,7 +1069,7 @@ function selfHealWorkerOnce(ctx: WorkerCtx): boolean {
   if (!shouldSelfHeal(cls)) return false
   logger.warn({ cls, session: ctx.session }, 'agent-worker: pane parked on unexpected chrome -- bounded Escape self-heal')
   for (let i = 0; i < WORKER_SELF_HEAL_MAX_ESCAPES; i++) {
-    try { execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(ctx.session), 'Escape'], { timeout: 5000 }) } catch { break }
+    try { execFileSync(tmuxBin(), ['send-keys', '-t', exactTmuxTarget(ctx.session), 'Escape'], { timeout: 5000 }) } catch { break }
     try { execFileSync('/bin/sleep', ['0.5'], { timeout: 2000 }) } catch { /* best effort */ }
     const now = classifyWorkerPane(capturePane(ctx.session))
     if (now === 'idle' || now === 'busy') {
@@ -1171,7 +1172,7 @@ function restartWorkerSession(ctx: WorkerCtx): void {
   }
   // TMUXWINDOWATTR920: stderr piped; "not running" is the expected case here,
   // so it is logged at debug with the site instead of copied onto stderr.
-  try { execFileSync(TMUX, ['kill-session', '-t', exactTmuxTarget(ctx.session)], { timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] }) } catch (err) { logger.debug({ site: 'agent-worker.restart', session: ctx.session, tmux: tmuxStderr(err) }, 'tmux kill-session: not running') }
+  try { execFileSync(tmuxBin(), ['kill-session', '-t', exactTmuxTarget(ctx.session)], { timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] }) } catch (err) { logger.debug({ site: 'agent-worker.restart', session: ctx.session, tmux: tmuxStderr(err) }, 'tmux kill-session: not running') }
   try { startWorkerSessionFor(ctx) } catch (err) { logger.warn({ err, session: ctx.session }, 'agent-worker: restart failed') }
 }
 
@@ -1180,9 +1181,9 @@ function clearWorkerContext(ctx: WorkerCtx): void {
   const effectiveModel = ctx.modelOverride ?? WORKER_MODEL_OVERRIDE ?? DEFAULT_AGENT_MODEL
   if (!getCliProvider(getCliTypeForModel(effectiveModel)).supportsSlashClear) return
   try {
-    execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(ctx.session), '-l', '/clear'], { timeout: 5000 })
+    execFileSync(tmuxBin(), ['send-keys', '-t', exactTmuxTarget(ctx.session), '-l', '/clear'], { timeout: 5000 })
     execFileSync('/bin/sleep', ['0.2'], { timeout: 2000 })
-    execFileSync(TMUX, ['send-keys', '-t', exactTmuxTarget(ctx.session), 'Enter'], { timeout: 5000 })
+    execFileSync(tmuxBin(), ['send-keys', '-t', exactTmuxTarget(ctx.session), 'Enter'], { timeout: 5000 })
     execFileSync('/bin/sleep', ['0.5'], { timeout: 2000 })
   } catch (err) {
     logger.warn({ err }, 'agent-worker: /clear failed (continuing)')
@@ -1286,6 +1287,36 @@ export async function runViaWorker(
 ): Promise<{ text: string | null; error?: string; authFailed?: boolean }> {
   const p = priority ?? classifyPriority(message)
   const ctx = p === 'fast' ? ctxFast : ctxSlow
+
+  // Lightweight headless path for non-Claude CLIs (codex / agy): no persistent
+  // tmux worker session or idle TUI memory overhead.
+  const workerModel = resolveWorkerModel({
+    override: ctx.modelOverride ?? WORKER_MODEL_OVERRIDE,
+    overrideSource: ctx.modelOverride ? 'env:MARVEEN_WORKER_MODEL_FAST' : 'env:MARVEEN_WORKER_MODEL',
+    customProviderModel: null,
+    configuredDefault: DEFAULT_AGENT_MODEL,
+    defaultIsDistribution: DEFAULT_AGENT_MODEL_IS_DISTRIBUTION,
+    launchableDefault: () => launchableInstallDefaultSync('worker'),
+    launchableFallback: () => launchableDistributionDefaultSync('worker'),
+    installedCli: () => measureClaudeCliVersionSync().version,
+  }).model
+  const workerCliType = getCliTypeForModel(workerModel)
+  if (shouldUseHeadlessMode(workerCliType) && (workerCliType === 'codex' || workerCliType === 'agy')) {
+    mkdirSync(ctx.home, { recursive: true, mode: 0o700 })
+    const res = await runHeadlessWorkerTurn({
+      cliType: workerCliType,
+      model: workerModel,
+      dir: ctx.home,
+      prompt: message,
+      timeoutMs,
+      priority: p === 'fast' ? 'normal' : 'low',
+    })
+    return {
+      text: res.ok && res.text ? res.text : null,
+      error: res.error,
+    }
+  }
+
   return withWorkerLockFor(ctx, async () => {
     for (let attempt = 0; attempt < 2; attempt++) {
       const r = await runWorkerAttempt(ctx, message, timeoutMs)

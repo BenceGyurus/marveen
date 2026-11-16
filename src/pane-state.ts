@@ -1644,6 +1644,10 @@ export function detectPaneState(
 
   const paneLines = pane.split('\n')
 
+  // Deterministic status marker emitted by headless (non-tmux) codex/agy agents.
+  const headlessMatch = /^\[marveen-headless:(busy|idle)\b/m.exec(liveTailRegion(paneLines, 5))
+  if (headlessMatch) return headlessMatch[1] as PaneState
+
   // Spinner / token-counter busy signals, scoped to the live bottom region.
   // Whole-pane scanning let a completed turn's stale token-counter line pin
   // an idle session busy (see BUSY_LIVE_REGION_LINES).

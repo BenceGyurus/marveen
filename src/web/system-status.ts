@@ -20,6 +20,7 @@ import { readEnvFile } from '../env.js'
 import { getDb, getDbFileSizeMb } from '../db.js'
 import { tryResolveFromPath } from '../platform.js'
 import { resolveCliBinary } from '../cli-detector.js'
+import { fleetGovernor } from './fleet-governor.js'
 import {
   projectsDirFor,
   readActiveModelFromProjectDir,
@@ -528,6 +529,13 @@ export function liveBlockSpecs(now = Date.now()): BlockSpec[] {
               }
             }
             return found.length ? found.join(' · ') : 'nincs CLI telepítve'
+          },
+        },
+        {
+          label: 'Headless Governor', source: 'fleetGovernor.getStats()',
+          collect: () => {
+            const g = fleetGovernor.getStats()
+            return `aktív ${g.activeCount}/${g.maxConcurrent} · várólista ${g.queuedCount} · szabad RAM ${g.availableMemMb}/${g.totalMemMb} MB (${g.cpus} vCPU)`
           },
         },
         {

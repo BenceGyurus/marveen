@@ -127,6 +127,16 @@ const claudeBin = makeLazyBinResolver('claude')
 const codexBin = makeLazyBinResolver('codex')
 const agyBin = makeLazyBinResolver('agy')
 import { getCliTypeForModel, getCliProvider, stripCliModelPrefix, prepareWorkspaceForCli, resolveHeadroomLauncher, resolveCliBinary, type CliType } from '../cli-detector.js'
+import {
+  shouldUseHeadlessMode,
+  registerHeadlessAgent,
+  unregisterHeadlessAgent,
+  isHeadlessAgent,
+  isHeadlessSession,
+  getHeadlessRunningSince,
+  captureHeadlessPane,
+  enqueueHeadlessPrompt,
+} from './headless-runner.js'
 
 // Shared async pacing helper. Replaces the blocking synchronous `/bin/sleep`
 // (execFileSync) pauses in the tmux-driving injection hot-path so a pacing wait
@@ -2250,6 +2260,7 @@ function captureTmuxAsync(target: string | null | TmuxTarget, tmuxArgs: string[]
 // an SSH drop must never read as 'stopped', which would trigger a wrong
 // auto-restart or a duplicate start). See classifyRunState.
 export function agentRunState(name: string): AgentRunState {
+  if (isHeadlessAgent(name)) return 'running'
   const target = agentTmuxTarget(name)
   const host = target.host
   try {
@@ -2276,6 +2287,7 @@ export function isAgentRunning(name: string): boolean {
 // laptop over ssh; an ssh failure returns false (the loop retries next tick),
 // matching the local "session not found" semantics.
 export function sessionExistsOnHost(host: string | null, session: string): boolean {
+  if (!host && isHeadlessSession(session)) return true
   try {
     // `list-sessions` carries no -t/-s, so the args-based fallback cannot see
     // whose session this is -- and a per-user agent's session lives on ITS OWN
@@ -2293,6 +2305,7 @@ export function sessionExistsOnHost(host: string | null, session: string): boole
 }
 
 export function getAgentRunningSince(name: string, session: string = agentSessionName(name)): number | null {
+  if (isHeadlessSession(session)) return getHeadlessRunningSince(session)
   try {
     const target = agentTmuxTarget(name)
     const host = target.host
@@ -3466,6 +3479,38 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     // silently started it as the router's user -- measured 2026-08-19: the start
     // reported ok, no session existed under the agent's user, and the first
     // capture-pane failed against the router's empty tmux server.
+    const useHeadless = !isCustom && shouldUseHeadlessMode(cliType)
+    if (useHeadless && (cliType === 'codex' || cliType === 'agy')) {
+      const headlessEnv: Record<string, string> = {
+        MARVEEN_AGENT_ID: name,
+      }
+      for (const k of altEnvKeys) {
+        const val = resolveAltEnvVal(k)
+        if (val) headlessEnv[k] = val
+      }
+      registerHeadlessAgent({
+        name,
+        session,
+        cliType,
+        model,
+        dir,
+        skipPermissions: Boolean(skipFlag),
+        env: headlessEnv,
+        fresh: opts.fresh,
+      })
+      logger.info({ name, session, cliType, model }, 'Headless agent started (no tmux)')
+      logger.info({ name, model, source: resolveAgentModelDetailed(name).source }, 'Agent launch model resolved')
+      if (shouldBriefAfterStart(opts, { ok: true })) {
+        scheduleRecoveryBrief(name, session, {
+          isReady: (target) => isSessionReadyForPrompt(target),
+          send: (target, text) =>
+            sendPromptToSession(target, text, null, { lockMode: 'deliver', onBusyTimeout: 'abort' }),
+        })
+      }
+      requeueAbandonedAndNotify(name)
+      return { ok: true }
+    }
+
     const startTarget = agentTmuxTarget(name)
     runTmux(startTarget, ['new-session', '-d', '-s', session, buildLaunchCmd(dir)], { timeout: 10000 })
 
@@ -3645,6 +3690,11 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
 export async function stopAgentProcess(name: string): Promise<{ ok: boolean; error?: string }> {
   // A brief still waiting for the old incarnation's pane must not fire into a later one.
   cancelRecoveryBrief(name)
+  if (isHeadlessAgent(name)) {
+    unregisterHeadlessAgent(name)
+    clearLaunchSecrets(name)
+    return { ok: true }
+  }
   const session = agentSessionName(name)
   if (!isAgentRunning(name)) return { ok: false, error: 'Agent is not running' }
 
@@ -4660,6 +4710,13 @@ export async function sendPromptToSession(
   host: string | null = null,
   opts: { waitForIdle?: boolean; onBusyTimeout?: 'send' | 'abort'; idleTimeoutMs?: number; lockMode?: SendLockMode; onBusySend?: () => void; onEmitStart?: () => void } & { emitGuard?: SendEmitGuard } = {},
 ): Promise<'sent' | 'aborted-busy' | 'skipped-locked' | 'aborted-guard' | 'aborted-guard-typed'> {
+  if (!host && isHeadlessSession(session)) {
+    opts.onEmitStart?.()
+    void enqueueHeadlessPrompt(session, text).catch((err) => {
+      logger.warn({ err, session }, 'headless prompt turn failed')
+    })
+    return 'sent'
+  }
   const lockMode: SendLockMode = opts.lockMode ?? 'deliver'
   // PANEWRITERS805: the three modal dismissals are probe+act keystroke writers
   // that ran BEFORE the lane lock -- so they could press Escape/Enter into a
@@ -5064,6 +5121,9 @@ export async function waitForTypedEcho(
 }
 
 export function capturePane(session: string, host: string | null = null): string | null {
+  if (!host && isHeadlessSession(session)) {
+    return captureHeadlessPane(session)
+  }
   try {
     // Capture WITH colour, strip a trailing /rename session-title banner, then
     // remove all remaining ANSI. For a pane without a banner this is byte-for-byte
@@ -5079,6 +5139,9 @@ export function capturePane(session: string, host: string | null = null): string
 
 /** Same contract as capturePane, without blocking the event loop; the sync twin stays for synchronous callers (withTmuxBatch accepts only synchronous functions). */
 export async function capturePaneAsync(session: string, host: string | null = null): Promise<string | null> {
+  if (!host && isHeadlessSession(session)) {
+    return captureHeadlessPane(session)
+  }
   try {
     return stripAllAnsi(stripSessionTitleBanner(await captureTmuxAsync(host, ['capture-pane', '-t', exactTmuxTarget(session), '-e', '-p'])))
   } catch {
@@ -5298,6 +5361,7 @@ export async function isSessionReadyForPrompt(
   // warn line per poll. Every other caller keeps 'warn'.
   opts: { saturationLog?: 'warn' | 'debug' } = {},
 ): Promise<boolean> {
+  if (!host && isHeadlessSession(session)) return true
   const saturationLog = opts.saturationLog ?? 'warn'
   // Dim-ghost tolerant idle read: CC >=2.1.202 paints a dim placeholder into
   // the empty input box, which a plain capture reads as parked text. Only when

@@ -66,7 +66,7 @@
 import { execFileSync } from 'node:child_process'
 import { logger } from '../logger.js'
 import { tmuxStderr } from './tmux-stderr.js'
-import { resolveFromPath } from '../platform.js'
+import { makeLazyBinResolver } from '../platform.js'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PROJECT_ROOT, STORE_DIR, BOT_NAME, MAIN_AGENT_ID } from '../config.js'
@@ -97,7 +97,7 @@ import {
 import { exactTmuxTarget } from '../tmux-target.js'
 import { whileNotFrozen } from './fleet-freeze.js'
 
-const TMUX = resolveFromPath('tmux')
+const tmuxBin = makeLazyBinResolver('tmux')
 
 // CPU-profile guard (#248): the genuine wedge is a render loop blocked on stdio
 // -- CPU collapses to ~0.3% (IO-wait). A frozen "Worked for Ns" counter on a
@@ -277,7 +277,7 @@ export function killGateTranscriptMtimeForSession(
 // other than exactly one pane gives null (no guessing between panes), so the caller falls back to the PROJECT_ROOT read.
 export function mainPaneCwd(session: string): string | null {
   try {
-    const lines = execFileSync(TMUX, ['list-panes', '-s', '-t', exactTmuxTarget(session), '-F', '#{pane_current_path}'], { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
+    const lines = execFileSync(tmuxBin(), ['list-panes', '-s', '-t', exactTmuxTarget(session), '-F', '#{pane_current_path}'], { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
       .split('\n').map(l => l.trim()).filter(Boolean)
     return lines.length === 1 ? lines[0] : null
   } catch (err) {
@@ -320,7 +320,7 @@ export function transcriptWrittenSinceStagnation(transcriptMtimeMs: number | nul
 function sampleMainClaudeCpuPercent(session: string): number | null {
   try {
     // TMUXWINDOWATTR920: stderr piped; a failure is logged with the site below.
-    const panePid = execFileSync(TMUX, ['list-panes', '-t', exactTmuxTarget(session), '-F', '#{pane_pid}'], { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
+    const panePid = execFileSync(tmuxBin(), ['list-panes', '-t', exactTmuxTarget(session), '-F', '#{pane_pid}'], { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
       .split('\n')[0]?.trim()
     if (!panePid || !/^\d+$/.test(panePid)) return null
     const out = execFileSync('/bin/ps', ['-o', '%cpu=', '-p', panePid], { timeout: 3000, encoding: 'utf-8' }).trim()
@@ -474,7 +474,7 @@ const shellLeaderWarned = new Set<string>()
 function sampleToolChildren(session: string, nowMs: number): void {
   const prev = toolChildState.get(session) ?? { cpuMs: null, lastActiveAt: null }
   try {
-    const panePid = execFileSync(TMUX, ['list-panes', '-t', exactTmuxTarget(session), '-F', '#{pane_pid}'], { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
+    const panePid = execFileSync(tmuxBin(), ['list-panes', '-t', exactTmuxTarget(session), '-F', '#{pane_pid}'], { timeout: 3000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
       .split('\n')[0]?.trim()
     if (!panePid || !/^\d+$/.test(panePid)) throw new Error('no pane pid')
     const out = execFileSync('/bin/ps', ['-axww', '-o', 'pid=,ppid=,stat=,cputime=,comm='], { timeout: 5000, encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
