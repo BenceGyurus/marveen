@@ -97,9 +97,10 @@ describe('isNativeClaudeBin', () => {
 
 describe('worker launch line carries the auto-updater clause', () => {
   it('the clause sits in the launch chain before the claude invocation', () => {
-    const launchBlock = workerSrc.slice(workerSrc.indexOf('const launch ='), workerSrc.indexOf("execFileSync(TMUX, ['new-session'"))
+    const launchBlock = workerSrc.slice(workerSrc.indexOf('const launch ='), workerSrc.indexOf("execFileSync(tmuxBin(), ['new-session'"))
     expect(launchBlock).toContain('autoUpdaterEnv +')
-    expect(launchBlock.indexOf('autoUpdaterEnv +')).toBeLessThan(launchBlock.indexOf('shArg(claudeLaunchBin)'))
+    expect(launchBlock).toContain('${claudeCmd}')
+    expect(launchBlock.indexOf('autoUpdaterEnv +')).toBeLessThan(launchBlock.indexOf('${claudeCmd}'))
   })
 
   it('the role is the slow-worker identity, and the opt-in comes from config', () => {

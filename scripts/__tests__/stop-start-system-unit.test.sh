@@ -107,7 +107,7 @@ fi
 
 # 3. No system units, user manager present -> the --user branch still runs.
 FAKE_SYSTEM_UNIT=0 FAKE_USER_MANAGER=1 run_script stop.sh
-if grep -q -- "^--user stop testslug-dashboard testslug-channels$" "$LOG"; then
+if grep -q -- "^--user stop testslug-dashboard testslug-channels testslug-channel-coordinator$" "$LOG"; then
   pass "stop: user-manager installs keep the --user branch"
 else
   fail "stop: user-manager installs keep the --user branch (log: $(cat "$LOG"))"
@@ -164,7 +164,7 @@ printf 'MAIN_AGENT_ID=testslug\nSERVICE_ID="unitslug"\n' > "$INSTALL/.env"
 
 # 8. stop.sh acts on the SERVICE_ID units.
 FAKE_SYSTEM_UNIT=0 FAKE_USER_MANAGER=1 run_script stop.sh
-if grep -q -- "^--user stop unitslug-dashboard unitslug-channels$" "$LOG"; then
+if grep -q -- "^--user stop unitslug-dashboard unitslug-channels unitslug-channel-coordinator$" "$LOG"; then
   pass "stop: units are named after SERVICE_ID when set"
 else
   fail "stop: units are named after SERVICE_ID when set (log: $(cat "$LOG"))"
@@ -193,7 +193,7 @@ fi
 
 # 11. User scope: stop.sh stops the existing testslug units.
 FAKE_UNIT_IDS="testslug" FAKE_SYSTEM_UNIT=0 FAKE_USER_MANAGER=1 run_script stop.sh
-if grep -q -- "^--user stop testslug-dashboard testslug-channels$" "$LOG"; then
+if grep -q -- "^--user stop testslug-dashboard testslug-channels testslug-channel-coordinator$" "$LOG"; then
   pass "stop: falls back to the existing MAIN_AGENT_ID units (user scope)"
 else
   fail "stop: falls back to the existing MAIN_AGENT_ID units (user scope) (log: $(cat "$LOG"))"
