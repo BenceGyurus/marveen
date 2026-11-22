@@ -32,7 +32,7 @@ vi.mock('node:child_process', () => ({
   },
 }))
 vi.mock('../logger.js', () => ({ logger: { info: h.info, warn: h.warn, error: vi.fn(), debug: h.debug } }))
-vi.mock('../platform.js', () => ({ resolveFromPath: () => '/usr/bin/tmux' }))
+vi.mock('../platform.js', () => ({ makeLazyBinResolver: () => () => '/usr/bin/tmux', resolveFromPath: () => '/usr/bin/tmux' }))
 vi.mock('../config.js', () => ({ PROJECT_ROOT: '/nonexistent-project-root', STORE_DIR: '/nonexistent-store-dir' }))
 // The watcher also imports the sub-agent sweep's helpers (SUBWAIT925); they are
 // mocked inert here so this file only drives the main session's checkSession.

@@ -1,3 +1,4 @@
+import { mayActAsOwner, refuseOwner } from './auth.js'
 import { existsSync, unlinkSync, copyFileSync, writeFileSync } from 'node:fs'
 import { join, extname } from 'node:path'
 import {
@@ -180,6 +181,10 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
   }
 
   if (path === '/api/marveen/model' && method === 'PUT') {
+    if (!mayActAsOwner(ctx.auth, req)) {
+      refuseOwner(res, 'Changing the main agent model requires an owner session.')
+      return true
+    }
     let parsed: { model?: unknown } = {}
     try {
       parsed = JSON.parse((await readBody(req)).toString('utf-8') || '{}') as { model?: unknown }

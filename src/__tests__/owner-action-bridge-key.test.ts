@@ -22,6 +22,7 @@ import { resolveAuth, SESSION_COOKIE_NAME } from '../web/auth-gate.js'
 import * as authModule from '../web/routes/auth.js'
 import { bridgeOwner, FIRST_RUN_PATHS, mayActAsOwner, mayActAsOwnerOrFirstRun, ownerCookieSession, tryHandleAuth } from '../web/routes/auth.js'
 import { isOwnerSession } from '../web/routes/gromzo.js'
+import { tryHandleMarveen } from '../web/routes/marveen.js'
 import { tryHandleSkills } from '../web/routes/skills.js'
 import { tryHandleFleetFreeze } from '../web/routes/fleet-freeze.js'
 import { tryHandleSecurity } from '../web/routes/security.js'
@@ -224,7 +225,7 @@ describe('which call site asks which predicate (source pin, every route file)', 
     expect(src('operator-access.ts')).toContain('!bridgeOwner(auth, req)')
   })
   it('the agent, channel, plan, provider and connector gates take the owner gate; only agent create, channel setup and a channel\'s first pairing approve take the first-run setup', () => {
-    for (const [f, owner, first] of [['agents.ts', 21, 3] /* MAINAUTHSWITCH1107: + the main auth switch */, ['connectors.ts', 10, 0] /* MAINAUTH1107: + agent-*-api-key writes */, ['claude-plans.ts', 3, 0], ['custom-providers.ts', 1, 0], ['agent-terminal.ts', 3, 0]] as const) {
+    for (const [f, owner, first] of [['agents.ts', 22, 3] /* MAINAUTHSWITCH1107: + the main auth switch */, ['connectors.ts', 10, 0] /* MAINAUTH1107: + agent-*-api-key writes */, ['claude-plans.ts', 3, 0], ['custom-providers.ts', 1, 0], ['agent-terminal.ts', 3, 0]] as const) {
       expect([f, count(f, 'mayActAsOwner'), count(f, 'mayActAsOwnerOrFirstRun')]).toEqual([f, owner, first])
     }
     expect(src('agents.ts')).toContain("firstPairing ? mayActAsOwnerOrFirstRun(ctx.auth, req, 'first-pairing') : mayActAsOwner(ctx.auth, req)")
@@ -244,6 +245,14 @@ describe('on the real routes', () => {
     return { status: out.status, code }
   }
   const refusedByOwnerGate = (r: { status: number, code: unknown }) => r.status === 403 && r.code === 'owner_session_required'
+
+  it('requires the owner before changing the main model', async () => {
+    const handler: Handler = ctx => tryHandleMarveen(ctx, '')
+    const headers = { authorization: `Bearer ${keyOf()}` }
+    expect(refusedByOwnerGate(await hit(handler, 'PUT', '/api/marveen/model', headers, {}))).toBe(true)
+    const owner = { ...headers, cookie: cookieHeader() }
+    expect((await hit(handler, 'PUT', '/api/marveen/model', owner, {})).status).toBe(400)
+  })
 
   it('R1: a skill decision: key + cookie passes the owner gate (then 404, no such pending skill); the key alone is 403', async () => {
     const key = keyOf()

@@ -46,6 +46,11 @@ const h = vi.hoisted(() => ({
   failed: [] as Array<{ id: number; reason: string }>,
 }))
 
+vi.mock('../platform.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../platform.js')>()
+  return { ...actual, makeLazyBinResolver: (name: string) => () => name }
+})
+
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
   const execFileSync = (file: string, args?: readonly string[]): string => {
@@ -262,18 +267,17 @@ function callsNamed(root: ts.Node, name: string): number {
   return n
 }
 
-// The pre-pass loop exactly as it was before the wrap (only re-indented);
-// pinning it byte-for-byte inside the callback proves no statement was added,
-// removed or reordered -- the wrap is the whole change.
-const ORIGINAL_LOOP = `
+// Main-channel and per-agent session reads must stay inside the batch.
+const EXPECTED_LOOP = `
 for (const agent of receiversInTick) {
-const host = readAgentRemoteHost(agent)
-const session = agentSessionName(agent)
+const isMain = agent === MAIN_AGENT_ID
+const host = isMain ? null : readAgentRemoteHost(agent)
+const session = isMain ? MAIN_CHANNELS_SESSION : agentSessionName(agent)
 const exists = sessionExistsOnHost(host, session)
 // Read once per receiver per tick, not once per message: the flag decides
 // the whole delivery path below and a per-message read would re-open the
 // same config file for every queued item.
-agentSessionCache.set(agent, { host, session, exists, worksource: readAgentWorksourceChannel(agent) })
+agentSessionCache.set(agent, { host, session, exists, worksource: isMain ? false : readAgentWorksourceChannel(agent) })
 if (exists) {
 presentNow.add(agent)
 } else {
@@ -304,7 +308,7 @@ describe('source pins: the receiver pre-pass runs inside withTmuxBatch', () => {
     if (!ts.isBlock(body)) throw new Error('expected the wrapped callback body to be a block')
     const loops = body.statements.filter((st) => ts.isForOfStatement(st))
     expect(loops).toHaveLength(1)
-    expect(nodeText(loops[0])).toBe(ORIGINAL_LOOP)
+    expect(nodeText(loops[0])).toBe(EXPECTED_LOOP)
     // The dedupable read is inside, once per receiver.
     expect(callsNamed(cb, 'sessionExistsOnHost')).toBe(1)
   })

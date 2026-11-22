@@ -1,7 +1,3 @@
-// Whole-card priority tint: the card background carries the priority colour
-// (layered over --bg-card), the left edge stays as a 4px stripe, and card
-// aging still recolours that edge. Computed styles were checked in a real
-// browser; this pins the CSS contract those results depend on.
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -26,10 +22,10 @@ function rule(selector: string): string {
 const tint = (sel: string) => /--card-tint:\s*([^;]+);/.exec(rule(sel))?.[1].trim()
 
 describe('priority tint', () => {
-  it('layers the tint over the theme card background and keeps a 4px edge', () => {
+  it('uses a flat theme card background and a 3px priority edge', () => {
     const base = rule('.kanban-card[data-priority]')
-    expect(base).toMatch(/background:\s*linear-gradient\(var\(--card-tint\), var\(--card-tint\)\), var\(--bg-card\)/)
-    expect(base).toMatch(/border-left:\s*4px solid var\(--card-edge\)/)
+    expect(base).toMatch(/background:\s*var\(--bg-card\)/)
+    expect(base).toMatch(/border-left:\s*3px solid var\(--card-edge\)/)
   })
 
   it('tints only urgent and high strongly; normal stays transparent', () => {

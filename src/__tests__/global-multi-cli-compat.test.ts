@@ -67,14 +67,14 @@ describe('Non-Claude CLI boot safety without claude on PATH', () => {
     expect(Array.isArray(res.entries)).toBe(true)
   })
 
-  it('mcp-list.ts, background-tasks.ts, and system-status.ts import cleanly without claude on PATH', () => {
+  it('mcp-list.ts, and background-tasks.ts import cleanly without claude on PATH', () => {
     const emptyDir = mkdtempSync(join(tmpdir(), 'marveen-nopath-'))
     try {
       const out = execFileSync(
         process.execPath,
         [
-          '-e',
-          `import('./dist/web/mcp-list.js').then(() => import('./dist/web/routes/background-tasks.js')).then(() => console.log('OK'))`,
+          '--import', 'tsx', '-e',
+          `import('./src/web/mcp-list.ts').then(() => import('./src/web/routes/background-tasks.ts')).then(() => console.log('OK'))`,
         ],
         { cwd: REPO, env: { ...process.env, PATH: emptyDir }, encoding: 'utf-8' },
       )
