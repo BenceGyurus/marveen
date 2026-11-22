@@ -500,7 +500,7 @@ export function startWebServer(port = 3420): http.Server {
   // a warm-up, not a hard dependency. Skipped on the SDK rollback backend.
   if (!servicesOff && (process.env.MARVEEN_AGENT_BACKEND || 'worker').toLowerCase() !== 'sdk') {
     import('./web/agent-worker.js')
-      .then(m => { m.startWorkerSession(); logger.info('Interactive agent worker pre-started') })
+      .then(m => m.startWorkerSession())
       .catch(err => logger.warn({ err }, 'Failed to pre-start agent worker (will lazy-start on first use)'))
   }
 
