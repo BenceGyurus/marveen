@@ -122,7 +122,9 @@ describe('no launch path is missing IS_SANDBOX (enumeration)', () => {
     for (const f of files) {
       const code = readFileSync(f, 'utf-8').split('\n')
         .filter((l) => { const t = l.trim(); return !t.startsWith('#') && !t.startsWith('//') && !t.startsWith('*') })
-      if (!code.some((l) => l.includes('--dangerously-skip-permissions'))) continue
+      const claudeLaunch = code.some((line) => line.includes('--dangerously-skip-permissions')
+        && !(relative(ROOT, f) === 'src/web/headless-runner.ts' && line.trim() === "args.push('--dangerously-skip-permissions')")) // agy -p
+      if (!claudeLaunch) continue
       launchers.push(relative(ROOT, f))
       if (!code.some((l) => l.includes('IS_SANDBOX') || l.includes('ROOT_SANDBOX_ENV'))) missing.push(relative(ROOT, f))
     }

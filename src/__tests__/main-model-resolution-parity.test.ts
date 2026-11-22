@@ -212,8 +212,9 @@ describe('every respawn path asks the one resolver (RESPAWNMODEL807)', () => {
     // count also caught the definition and a comment mention (measured: 4 vs
     // 3 real calls at 714/784/997) and would drift with prose edits.
     const sites = src.split('= buildMainSessionRespawnCmd({').length - 1
-    const wired = src.split('model: readConfiguredMainModel()').length - 1
+    const wired = src.split('model: mainModel,').length - 1
     expect(sites).toBeGreaterThanOrEqual(3)
+    expect(src.split('const mainModel = readConfiguredMainModel()').length - 1).toBe(sites)
     expect(wired).toBe(sites)
   })
 

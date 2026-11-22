@@ -1010,13 +1010,31 @@ export function isWorkerSessionAlive(session: string): boolean {
   return sessionExistsOnHost(null, session)
 }
 
+function workerRequestModel(ctx: WorkerCtx): string {
+  return resolveWorkerModel({
+    override: ctx.modelOverride ?? WORKER_MODEL_OVERRIDE,
+    overrideSource: ctx.modelOverride ? 'env:MARVEEN_WORKER_MODEL_FAST' : 'env:MARVEEN_WORKER_MODEL',
+    customProviderModel: null,
+    configuredDefault: DEFAULT_AGENT_MODEL,
+    defaultIsDistribution: DEFAULT_AGENT_MODEL_IS_DISTRIBUTION,
+    launchableDefault: () => launchableInstallDefaultSync('worker'),
+    launchableFallback: () => launchableDistributionDefaultSync('worker'),
+    installedCli: () => measureClaudeCliVersionSync().version,
+  }).model
+}
+
 /**
- * Pre-start both worker sessions. Called at server startup to amortise boot
+ * Pre-start interactive worker sessions. Called at server startup to amortise boot
  * latency across first requests. Idempotent -- a running session is a no-op.
  */
 export function startWorkerSession(): void {
-  startWorkerSessionFor(ctxSlow)
-  startWorkerSessionFor(ctxFast)
+  if (!workerStartAllowed()) return
+  for (const ctx of workerContexts()) {
+    const cli = getCliTypeForModel(workerRequestModel(ctx))
+    if (shouldUseHeadlessMode(cli)) continue
+    if (cli === 'claude' && !tryResolveFromPath('claude')) continue
+    startWorkerSessionFor(ctx)
+  }
 }
 
 /**
@@ -1290,16 +1308,7 @@ export async function runViaWorker(
 
   // Lightweight headless path for non-Claude CLIs (codex / agy): no persistent
   // tmux worker session or idle TUI memory overhead.
-  const workerModel = resolveWorkerModel({
-    override: ctx.modelOverride ?? WORKER_MODEL_OVERRIDE,
-    overrideSource: ctx.modelOverride ? 'env:MARVEEN_WORKER_MODEL_FAST' : 'env:MARVEEN_WORKER_MODEL',
-    customProviderModel: null,
-    configuredDefault: DEFAULT_AGENT_MODEL,
-    defaultIsDistribution: DEFAULT_AGENT_MODEL_IS_DISTRIBUTION,
-    launchableDefault: () => launchableInstallDefaultSync('worker'),
-    launchableFallback: () => launchableDistributionDefaultSync('worker'),
-    installedCli: () => measureClaudeCliVersionSync().version,
-  }).model
+  const workerModel = workerRequestModel(ctx)
   const workerCliType = getCliTypeForModel(workerModel)
   if (shouldUseHeadlessMode(workerCliType) && (workerCliType === 'codex' || workerCliType === 'agy')) {
     mkdirSync(ctx.home, { recursive: true, mode: 0o700 })
