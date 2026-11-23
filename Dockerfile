@@ -55,10 +55,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Pinned agent runtime: the claude CLI (npm-global, /usr/local/bin/claude) and bun (the Telegram/Discord channel
 # plugins run on it). A new version is a new image.
+ARG NPM_VERSION=11.21.3
 ARG CLAUDE_CODE_VERSION=2.1.311
 ARG BUN_VERSION=1.4.4
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "bun@${BUN_VERSION}" \
-    && claude --version && bun --version
+RUN npm install -g "npm@${NPM_VERSION}" \
+    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "bun@${BUN_VERSION}" \
+    && npm --version && claude --version && bun --version
 
 # The managed policy the Linux installer writes with sudo (scripts/ensure-managed-channels-enabled.sh): without
 # channelsEnabled, claude-code drops inbound channel messages on Team/Enterprise orgs.
