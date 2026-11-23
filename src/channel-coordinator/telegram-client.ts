@@ -73,8 +73,9 @@ interface RawMessage {
   caption?: string
   chat: { id: number; username?: string; title?: string }
   from?: RawUser
-  photo?: unknown[]
-  document?: { file_id: string; file_name?: string }
+  photo?: { file_id: string; width: number; height: number }[]
+  document?: { file_id: string; file_name?: string; mime_type?: string }
+  media_group_id?: string
   voice?: { file_id: string }
   message_thread_id?: number
   is_topic_message?: boolean
@@ -106,8 +107,21 @@ export function mapUpdate(u: RawUpdate): NormalizedEvent | null {
         ? 'channel_post'
         : 'message'
     const meta: Record<string, unknown> = {}
-    if (Array.isArray(msg.photo) && msg.photo.length > 0) meta['has_photo'] = true
-    if (msg.document) meta['document'] = { file_id: msg.document.file_id, file_name: msg.document.file_name }
+    const photo = msg.photo?.reduce<NonNullable<RawMessage['photo']>[number] | undefined>((best, size) =>
+      !best || size.width * size.height >= best.width * best.height ? size : best, undefined)
+    const document = msg.document
+    if (photo) meta['has_photo'] = true
+    if (document) meta['document'] = { file_id: document.file_id, file_name: document.file_name }
+    const imageFileId = photo?.file_id ?? (
+      document && (/^image\/(?:jpeg|png|gif|webp)$/i.test(document.mime_type ?? '') ||
+        /\.(?:jpe?g|png|gif|webp)$/i.test(document.file_name ?? '')) ? document.file_id : undefined
+    )
+    if (imageFileId) {
+      meta['image'] = {
+        fileId: imageFileId,
+        ...(msg.media_group_id ? { albumId: msg.media_group_id } : {}),
+      }
+    }
     if (msg.voice) meta['voice'] = { file_id: msg.voice.file_id }
     // A topic of a private chat or forum; the handoff shows it only while
     // TELEGRAM_TOPICS_ENABLED is on (buildHandoffContent).

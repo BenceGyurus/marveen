@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { runLsof } from './lsof.js'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS, MAIN_AGENT_ID, STORE_DIR } from './config.js'
+import { pruneTelegramImages } from '../scripts/telegram-image-cache.mjs'
 import { watchEgressAllowlistBaseline, queueAllowlistReport } from './web/egress-allowlist-baseline.js'
 import { loadOrCreateDashboardToken } from './web/dashboard-auth.js'
 import { gateRequest, requiresAuth, type AuthResult } from './web/auth-gate.js'
@@ -693,6 +694,9 @@ export function startWebServer(port = 3420): http.Server {
   const stopTelegramInboundReplay = servicesOff ? undefined : startTelegramInboundReplay()
   if (!servicesOff) logger.info('Telegram inbound replay started (60s poll, 90s offset)')
   const stopHeadlessTelegramPolling = servicesOff ? undefined : startHeadlessTelegramPolling()
+  const telegramImageCleanup = servicesOff ? undefined : setInterval(() => {
+    void pruneTelegramImages(PROJECT_ROOT).catch(() => logger.warn('Telegram image cleanup failed'))
+  }, 60 * 60 * 1000).unref()
   const teamsCredentialInterval = servicesOff ? undefined : startTeamsCredentialMonitor()
   if (!servicesOff) logger.info('Teams credential monitor started (daily, 5min offset)')
 
@@ -1010,6 +1014,7 @@ setInterval(() => { try { sweepExpiredDesktopLock() } catch { /* never kill the 
     if (channelIntakeInterval) clearInterval(channelIntakeInterval)
     if (stopTelegramInboundReplay) stopTelegramInboundReplay()
     stopHeadlessTelegramPolling?.()
+    clearInterval(telegramImageCleanup)
     if (teamsCredentialInterval) clearInterval(teamsCredentialInterval)
     if (costsSyncInterval) clearInterval(costsSyncInterval)
     clearInterval(stuckInputInterval)

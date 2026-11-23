@@ -183,7 +183,7 @@ describe('runLoop persists only the offset processBatch returns (source pin)', (
   // non-blank line after it persists exactly the returned offset, nothing else.
   function batchOffsetComesStraightFromProcessBatch(body: string): boolean {
     const stripped = stripLineComments(body)
-    const call = 'const { offset, stalled } = processBatch(updates)'
+    const call = 'const { offset, stalled } = processBatch(updates'
     if (countOccurrences(collapse(stripped), call) !== 1) return false
     const lines = stripped.split('\n').map(collapse)
     const callIdx = lines.findIndex((line) => line.includes(call))

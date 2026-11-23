@@ -37,6 +37,8 @@ import { PROJECT_ROOT, MAIN_AGENT_ID, CHANNEL_PROVIDER, BOT_NAME } from './confi
 import { parseEnvContent } from './env-parse.js'
 import { resolveConfiguredMainCliType } from './cli-detector.js'
 import { getUpdates, probeHighWater, mapUpdate, TelegramApiError } from './channel-coordinator/telegram-client.js'
+import { cacheTelegramImages } from './channel-coordinator/images.js'
+import type { CachedTelegramImage } from '../scripts/telegram-image-cache.mjs'
 import { probeNativeChannelDown } from './channel-coordinator/liveness.js'
 import {
   initIngestDb,
@@ -416,6 +418,8 @@ export function buildHandoffContent(ev: {
   const ts = ev.tg_date ? new Date(ev.tg_date * 1000).toISOString() : ''
   const voiceMeta = ev.meta?.voice as { file_id?: string } | undefined
   const voiceFileId = voiceMeta?.file_id ?? ''
+  const image = ev.meta?.cached_image as CachedTelegramImage | undefined
+  const imagePath = image?.path?.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
   const thread = ev.meta?.message_thread_id
   const threadId = topics && Number.isSafeInteger(thread) && (thread as number) > 0 ? thread as number : null
   const attrs = [
@@ -429,8 +433,12 @@ export function buildHandoffContent(ev: {
     ev.kind !== 'message' ? `kind="${ev.kind}"` : '',
     voiceFileId ? `attachment_kind="voice"` : '',
     voiceFileId ? `attachment_file_id="${voiceFileId}"` : '',
+    imagePath ? `image_path="${imagePath}"` : '',
+    image?.id ? `image_id="${image.id}"` : '',
+    image?.albumId && /^[A-Za-z0-9_-]{1,64}$/.test(image.albumId) ? `image_album_id="${image.albumId}"` : '',
+    image && !imagePath ? 'image_status="unavailable"' : '',
   ].filter(Boolean).join(' ')
-  const body = neutralizeChannelTags(ev.content || '(empty message)')
+  const body = neutralizeChannelTags(ev.content || (image ? '(image attached)' : '(empty message)'))
   return `<channel ${attrs}>\n${body}\n</channel>`
 }
 
@@ -456,6 +464,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 export function processBatch(
   updates: { update_id: number }[],
   policy: TelegramAccessPolicy = loadTelegramAccessPolicy(),
+  cachedImages?: ReadonlyMap<number, CachedTelegramImage>,
 ): { offset: number | null; stalled: boolean } {
   let durable: number | null = null
   for (const raw of updates) {
@@ -474,6 +483,8 @@ export function processBatch(
       continue
     }
 
+    const image = cachedImages?.get(ev.update_id)
+    if (image) ev.meta.cached_image = image
     let ins: InsertResult
     try {
       ins = insertIncomingEvent(SOURCE, ev)
@@ -662,7 +673,16 @@ async function runLoop(token: string): Promise<void> {
       continue
     }
 
-    const { offset, stalled } = processBatch(updates)
+    const policy = loadTelegramAccessPolicy()
+    const images = await cacheTelegramImages(
+      updates.flatMap(raw => {
+        const event = mapUpdate(raw)
+        return event && isTelegramEventAuthorized(event, policy) ? [event] : []
+      }),
+      token,
+    )
+    if (stopping || (images.size > 0 && !probeNativeChannelDown(SESSION, PROVIDER))) continue
+    const { offset, stalled } = processBatch(updates, images.size > 0 ? loadTelegramAccessPolicy() : policy, images)
     // Persist offset ONLY after the batch is durable + handed off.
     if (offset != null) setOffset(SOURCE, offset)
     if (stalled) {
