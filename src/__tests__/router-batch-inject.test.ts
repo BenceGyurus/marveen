@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 const mockGetPendingMessages = vi.fn()
 const mockMarkDelivered = vi.fn((..._a: unknown[]) => true)
 const mockMarkFailed = vi.fn((..._a: unknown[]) => true)
-const mockSendPrompt = vi.fn(async (..._a: unknown[]) => 'sent' as const)
+const mockSendPrompt = vi.fn<(...args: unknown[]) => Promise<'sent' | 'skipped-locked'>>(async () => 'sent')
 const liveStatus = new Map<number, string | null>()
 const mockGetMessageStatus = vi.fn((id: number) => liveStatus.get(id) ?? null)
 const newerCounts = new Map<number, number>()
@@ -156,6 +156,23 @@ describe('message router: multi-envelope injection (B1F38C8C)', () => {
     expect(second).not.toContain('[KOTEG')
     expect(second).toContain('<channel')
     expect(delivered().sort()).toEqual([831, 832, 833])
+  })
+
+  it('retries a Telegram message that was skipped before submission', async () => {
+    snapshot([{ id: 834, from: 'telegram-coordinator' }])
+    mockSendPrompt.mockResolvedValueOnce('skipped-locked')
+    await runMessageRouterTick()
+    expect(mockSendPrompt).toHaveBeenCalledTimes(1)
+    expect(delivered()).toEqual([])
+    await runMessageRouterTick()
+    expect(delivered()).toEqual([834])
+  })
+
+  it('keeps a skipped batch pending', async () => {
+    snapshot([{ id: 835, from: 'orin' }, { id: 836, from: 'geri' }])
+    mockSendPrompt.mockResolvedValue('skipped-locked')
+    await runMessageRouterTick()
+    expect(delivered()).toEqual([])
   })
 
   it('a mate whose row is no longer pending at send time is left out and not marked (same liveness rule as the head)', async () => {

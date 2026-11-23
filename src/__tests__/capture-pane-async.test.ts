@@ -85,6 +85,14 @@ describe('async capture leaves the event loop responsive', () => {
     expect(h.finishes[0].fired, 'probe timer fired before first capture finished').toBe(true)
   })
 
+  it('reports unavailable captures without a second tmux probe', async () => {
+    h.fail = true
+    const onBlocked = vi.fn()
+    expect(await agentProcess.isSessionReadyForPrompt('agent-x', null, { onBlocked })).toBe(false)
+    expect(onBlocked).toHaveBeenCalledExactlyOnceWith('capture-unavailable')
+    expectResponsiveCaptures(1)
+  })
+
   it('recovery: probe timer fired before the capture finished', async () => {
     await recoverStuckInputForSession('agent-x', { parkedSig: null, firstSeenAt: null, lastRecoverAt: null, attempts: 0 }, { confirmMs: 1000, dedupMs: 1000, maxAttempts: 3 }, true)
     expect(h.finishes[0].fired, 'probe timer fired before first capture finished').toBe(true)

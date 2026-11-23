@@ -446,15 +446,17 @@ export function syncCliMcpConfig(
     }
 
     if (cliType === 'agy') {
-      const configPath = join(home, '.gemini', 'antigravity', 'mcp_config.json')
+      const configPath = join(home, '.gemini', 'config', 'mcp_config.json')
       mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 })
       if (existsSync(configPath) && lstatSync(configPath).isSymbolicLink()) return false
       let data: Record<string, unknown> = {}
       if (existsSync(configPath)) {
         try {
-          data = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
+          const parsed: unknown = JSON.parse(readFileSync(configPath, 'utf-8'))
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false
+          data = parsed as Record<string, unknown>
         } catch {
-          data = {}
+          return false
         }
       }
       const mcpServers =

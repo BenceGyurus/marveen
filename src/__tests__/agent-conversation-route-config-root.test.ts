@@ -24,7 +24,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import { encodeClaudeProjectDir } from '../claude-project-dir.js'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, utimesSync } from 'node:fs'
+import { mkdirSync, appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -109,6 +109,23 @@ describe('conversation view: which config root the transcript is read from (#271
     // even then.
     writeTranscript(projectsDir(SHARED_CONFIG, SUB_WORKING_DIR), 'old-sub-session.jsonl', 'stale sub reply', 1)
     writeTranscript(projectsDir(ISOLATED_SUB_CONFIG, SUB_WORKING_DIR), 'live-sub-session.jsonl', 'live sub reply', 60)
+  })
+
+  it('shows Telegram input stored in a Claude user text block', async () => {
+    const file = join(projectsDir(ISOLATED_MAIN_CONFIG, PROJECT_ROOT), 'live-session.jsonl')
+    const original = readFileSync(file, 'utf-8')
+    try {
+      appendFileSync(file, JSON.stringify({
+        type: 'user',
+        message: { content: [
+          { type: 'text', text: '<channel source="telegram">Szia!</channel>' },
+          { type: 'tool_result', content: '<channel source="telegram">Tool result</channel>' },
+        ] },
+      }) + '\n')
+      expect((await getConversation('marveen')).entries.map(e => e.text)).toEqual(['live main reply', 'Szia!'])
+    } finally {
+      writeFileSync(file, original)
+    }
   })
 
   afterAll(() => {

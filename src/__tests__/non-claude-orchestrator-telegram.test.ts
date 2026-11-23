@@ -179,6 +179,8 @@ describe('Non-Claude main orchestrator Telegram pipeline', () => {
 
       mkdirSync(stateDir, { recursive: true })
       writeFileSync(join(stateDir, '.env'), "TELEGRAM_BOT_TOKEN='333:coord-token'\n")
+      expect(resolveCoordinatorTelegramToken({ stateDir, projectRoot, homeDir, env: {} })).toBe('222:store-token')
+      rmSync(join(projectRoot, 'store', '.claude-channels', 'telegram', '.env'))
       expect(resolveCoordinatorTelegramToken({ stateDir, projectRoot, homeDir, env: {} })).toBe('333:coord-token')
 
       expect(
@@ -189,6 +191,32 @@ describe('Non-Claude main orchestrator Telegram pipeline', () => {
           env: { TELEGRAM_BOT_TOKEN: '444:env-token' },
         }),
       ).toBe('444:env-token')
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  it('uses this installation’s Telegram token ahead of saved global copies', () => {
+    const base = mkdtempSync(join(tmpdir(), 'coord-install-token-'))
+    try {
+      const projectRoot = join(base, 'install')
+      const homeDir = join(base, 'home')
+      const stateDir = join(homeDir, '.claude', 'channels', 'telegram-coordinator')
+      const nativeDir = join(projectRoot, '.claude', 'channels', 'telegram')
+      mkdirSync(stateDir, { recursive: true })
+      mkdirSync(nativeDir, { recursive: true })
+      const options = { projectRoot, homeDir, stateDir, env: {} }
+      writeFileSync(join(stateDir, '.env'), 'TELEGRAM_BOT_TOKEN=111:stale-copy\n')
+      writeFileSync(join(projectRoot, '.env'), 'TELEGRAM_BOT_TOKEN=222:install-token\n')
+      expect(resolveCoordinatorTelegramToken(options)).toBe('222:install-token')
+
+      writeFileSync(join(nativeDir, '.env'), 'TELEGRAM_BOT_TOKEN=333:native-token\n')
+      expect(resolveCoordinatorTelegramToken(options)).toBe('333:native-token')
+
+      const legacyDir = join(homeDir, '.claude', 'channels', 'telegram')
+      mkdirSync(legacyDir, { recursive: true })
+      writeFileSync(join(legacyDir, '.env'), 'TELEGRAM_BOT_TOKEN=444:explicit-state\n')
+      expect(resolveCoordinatorTelegramToken({ ...options, env: { TELEGRAM_STATE_DIR: legacyDir } })).toBe('444:explicit-state')
     } finally {
       rmSync(base, { recursive: true, force: true })
     }
@@ -239,7 +267,7 @@ describe('Non-Claude main orchestrator Telegram pipeline', () => {
     await runMessageRouterTick()
 
     expect(mockSessionExists).toHaveBeenCalledWith(null, 'marveen-channels')
-    expect(mockIsSessionReady).toHaveBeenCalledWith('marveen-channels', null)
+    expect(mockIsSessionReady).toHaveBeenCalledWith('marveen-channels', null, { onBlocked: expect.any(Function) })
     expect(mockSendPromptToSession).toHaveBeenCalledTimes(1)
     expect(mockSendPromptToSession.mock.calls[0]?.[0]).toBe('marveen-channels')
     expect(String(mockSendPromptToSession.mock.calls[0]?.[1])).toContain('szia marveen')
