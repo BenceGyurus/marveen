@@ -634,6 +634,11 @@ describe('headroom integration: launcher, MCP config sync, and sandboxed install
 
         const agyPath = join(fakeHome, '.gemini', 'config', 'mcp_config.json')
         mkdirSync(dirname(agyPath), { recursive: true })
+        writeFileSync(agyPath, '')
+        expect(syncCliMcpConfig('agy', mcpJsonPath, { homeDir: fakeHome })).toBe(true)
+        const initialAgyCfg = JSON.parse(readFileSync(agyPath, 'utf-8'))
+        expect(initialAgyCfg.mcpServers.marveen_telegram.args).toEqual([join(fakeWorkspace, 'scripts', 'channel-reply-mcp.mjs')])
+
         writeFileSync(agyPath, '{ invalid JSON')
         expect(syncCliMcpConfig('agy', mcpJsonPath, { homeDir: fakeHome })).toBe(false)
         expect(readFileSync(agyPath, 'utf-8')).toBe('{ invalid JSON')

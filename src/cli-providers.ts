@@ -451,8 +451,9 @@ export function syncCliMcpConfig(
       if (existsSync(configPath) && lstatSync(configPath).isSymbolicLink()) return false
       let data: Record<string, unknown> = {}
       if (existsSync(configPath)) {
+        const content = readFileSync(configPath, 'utf-8').trim()
         try {
-          const parsed: unknown = JSON.parse(readFileSync(configPath, 'utf-8'))
+          const parsed: unknown = content ? JSON.parse(content) : {}
           if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false
           data = parsed as Record<string, unknown>
         } catch {
