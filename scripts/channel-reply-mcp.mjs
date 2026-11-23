@@ -9,6 +9,7 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
+import { listTelegramImages, readTelegramImage } from './telegram-image-cache.mjs'
 
 const SERVER_NAME = 'marveen_telegram'
 const SERVER_VERSION = '1.0.0'
@@ -65,6 +66,7 @@ function resolveTelegramCredentials(projectRoot = DEFAULT_PROJECT_ROOT) {
   const dirs = candidateStateDirs(projectRoot)
   let token = null
   let allowFrom = new Set()
+  const groupChats = new Set()
 
   for (const dir of dirs) {
     if (!token) {
@@ -79,8 +81,11 @@ function resolveTelegramCredentials(projectRoot = DEFAULT_PROJECT_ROOT) {
           const s = String(item).trim()
           if (s) allowFrom.add(s)
         }
-        if (scoped && parsed?.groups && typeof parsed.groups === 'object') {
-          for (const chatId of Object.keys(parsed.groups)) allowFrom.add(chatId)
+        if (parsed?.groups && typeof parsed.groups === 'object') {
+          for (const chatId of Object.keys(parsed.groups)) {
+            groupChats.add(chatId)
+            if (scoped) allowFrom.add(chatId)
+          }
         }
       } catch { /* ignore */ }
     }
@@ -94,7 +99,7 @@ function resolveTelegramCredentials(projectRoot = DEFAULT_PROJECT_ROOT) {
     if (allowedChat && allowedChat !== '0') allowFrom.add(allowedChat)
   }
 
-  return { token, allowFrom, scoped }
+  return { token, allowFrom, scoped, groupChats }
 }
 
 function splitChunks(text, limit = TELEGRAM_MAX_CHUNK) {
@@ -182,6 +187,32 @@ const TOOLS = [
       required: ['text'],
     },
   },
+  {
+    name: 'telegram_list_images',
+    description: 'List recent Telegram images for the current chat, optionally filtered to an album. Pass nextCursor as after to continue, and open each relevant image using telegram_read_image.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chat_id: { type: 'string', description: 'Chat ID from the channel message.' },
+        album_id: { type: 'string', description: 'Optional image_album_id from the channel message.' },
+        after: { type: 'string', description: 'Optional nextCursor from the previous page.' },
+        limit: { type: 'integer', minimum: 1, maximum: 100 },
+      },
+      required: ['chat_id'],
+    },
+  },
+  {
+    name: 'telegram_read_image',
+    description: 'Open one cached Telegram image as visual input. Use the image_id from the channel message or an id returned by telegram_list_images.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chat_id: { type: 'string', description: 'Chat ID from the channel message.' },
+        image_id: { type: 'string', description: 'The cached image ID.' },
+      },
+      required: ['chat_id', 'image_id'],
+    },
+  },
 ]
 
 function writeRpc(msg) {
@@ -215,6 +246,24 @@ async function handleRequest(msg) {
     }
     if (method === 'tools/call') {
       const name = params?.name
+      if (name === 'telegram_list_images' || name === 'telegram_read_image') {
+        const args = params?.arguments ?? {}
+        const chatId = String(args.chat_id ?? '').trim()
+        const { token, allowFrom, groupChats } = resolveTelegramCredentials()
+        if (!token || (!allowFrom.has(chatId) && !groupChats.has(chatId))) {
+          throw new Error('Telegram image chat is not authorized')
+        }
+        const content = name === 'telegram_read_image'
+          ? await readTelegramImage(DEFAULT_PROJECT_ROOT, token, chatId, args.image_id)
+          : {
+            type: 'text',
+            text: JSON.stringify(await listTelegramImages(DEFAULT_PROJECT_ROOT, token, chatId, {
+              albumId: args.album_id, after: args.after, limit: args.limit,
+            })),
+          }
+        writeRpc({ jsonrpc: '2.0', id, result: { content: [content] } })
+        return
+      }
       if (name === 'telegram_reply') {
         const resultText = await sendTelegramReply(params?.arguments || {})
         writeRpc({

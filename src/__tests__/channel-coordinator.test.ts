@@ -66,13 +66,17 @@ describe('mapUpdate', () => {
         message_id: 6,
         text: undefined,
         caption: 'nezd ezt',
-        photo: [{}, {}],
+        photo: [
+          { file_id: 'small', width: 80, height: 80 },
+          { file_id: 'large', width: 640, height: 480 },
+        ],
         chat: { id: 42 },
         from: { id: 7, first_name: 'Bob' },
       },
     })!
     expect(ev.content).toBe('nezd ezt')
     expect(ev.meta['has_photo']).toBe(true)
+    expect(ev.meta['image']).toEqual({ fileId: 'large' })
     expect(ev.username).toBe('Bob')
   })
 

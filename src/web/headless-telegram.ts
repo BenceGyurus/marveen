@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { buildHandoffContent, resolveCoordinatorTelegramToken } from '../channel-coordinator.js'
+import { cacheTelegramImages } from '../channel-coordinator/images.js'
 import { closeIngestDb, commitIncomingBatch, getOffset, initIngestDb } from '../channel-coordinator/ingest.js'
 import { getUpdates, mapUpdate, TelegramApiError, type NormalizedEvent } from '../channel-coordinator/telegram-client.js'
 import { channelStateDir, getProvider, readChannelToken } from '../channel-provider.js'
@@ -72,7 +73,7 @@ export async function pollHeadlessTelegram(
   const access = readAccess(accessPath)
   if (!access) return
 
-  const events: Parameters<typeof commitIncomingBatch>[3] = []
+  const events: NormalizedEvent[] = []
   const pairings: { code: string; chatId: string }[] = []
   const now = Date.now()
   const pending = Object.fromEntries(Object.entries(access.pending ?? {})
@@ -84,7 +85,7 @@ export async function pollHeadlessTelegram(
     const event = mapUpdate(raw)
     if (!event || event.kind === 'callback_query') continue
     if (isAllowed(event, access)) {
-      events.push({ event, content: buildHandoffContent(event) })
+      events.push(event)
     } else if (access.dmPolicy === 'pairing' && event.kind === 'message' &&
       event.user_id != null && event.chat_id === event.user_id &&
       Object.keys(pending).length < 5 &&
@@ -98,8 +99,21 @@ export async function pollHeadlessTelegram(
   if (pairings.length > 0) {
     atomicWriteFileSync(accessPath, JSON.stringify({ ...access, pending }, null, 2), { mode: 0o600 })
   }
-  if (highWater > offset) commitIncomingBatch(source, highWater, name, events)
-  if (events.length > 0) logger.info({ name, updates: events.length }, 'Headless Telegram messages queued')
+  let handoffs = events
+  if (events.some(event => event.meta.image)) {
+    const cached = await cacheTelegramImages(events, token)
+    const currentAccess = readAccess(accessPath)
+    if (!currentAccess || opts.isCurrent?.() === false || readToken(stateDir) !== token) return
+    handoffs = events.filter(event => isAllowed(event, currentAccess))
+    for (const event of handoffs) {
+      const image = cached.get(event.update_id)
+      if (image) event.meta.cached_image = image
+    }
+  }
+  if (highWater > offset) {
+    commitIncomingBatch(source, highWater, name, handoffs.map(event => ({ event, content: buildHandoffContent(event) })))
+  }
+  if (handoffs.length > 0) logger.info({ name, updates: handoffs.length }, 'Headless Telegram messages queued')
 
   const send = opts.sendPairingNotice ?? getProvider('telegram').sendMessage
   await Promise.all(pairings.map(async ({ code, chatId }) => {
