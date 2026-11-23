@@ -1,7 +1,7 @@
 # HOSTINGERDOCKER1107: the Marveen container image.
 #   build:   every PR and push that touches the image builds it for linux/amd64 and linux/arm64 (no push), and
 #            runs the offline smoke (docker/ci-smoke.sh) on the amd64 image.
-#   publish: a release tag (v*) pushes ghcr.io/szotasz/marveen:<version> and :latest, ONLY when the repository
+#   publish: a release tag (v*) pushes ghcr.io/<owner>/<repository>:<version> and :latest, ONLY when the repository
 #            variable MARVEEN_PUBLISH_IMAGE is 'true' (off until the live VPS trial passed and the maintainer turns it on).
 #            After the push it pulls the image it just published, by digest and WITHOUT a registry login (the way an
 #            install pulls it), and runs the same offline smoke on it: a private package or a broken push fails here.
@@ -71,6 +71,7 @@ jobs:
     timeout-minutes: 60
     outputs:
       digest: ${{ steps.push.outputs.digest }}
+      image: ${{ steps.registry.outputs.image }}
     permissions:
       contents: read
       packages: write
@@ -83,10 +84,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve this repository's GHCR image name
+        id: registry
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/szotasz/marveen
+          images: ${{ steps.registry.outputs.image }}
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=latest
@@ -107,16 +111,18 @@ jobs:
       - name: Pull the published image anonymously, by digest
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE: ${{ steps.registry.outputs.image }}
         run: |
           set -eu
           case "$DIGEST" in sha256:*) ;; *) echo "no digest from the push step: '$DIGEST'"; exit 1;; esac
           docker logout ghcr.io
-          docker pull "ghcr.io/szotasz/marveen@$DIGEST"
-          echo "published: ghcr.io/szotasz/marveen@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          docker pull "$IMAGE@$DIGEST"
+          echo "published: $IMAGE@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
       - name: Offline smoke on the published image (amd64)
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
-        run: bash docker/ci-smoke.sh "ghcr.io/szotasz/marveen@$DIGEST"
+          IMAGE: ${{ steps.registry.outputs.image }}
+        run: bash docker/ci-smoke.sh "$IMAGE@$DIGEST"
 
   release:
     needs: [build, publish]
@@ -134,6 +140,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
           DIGEST: ${{ needs.publish.outputs.digest }}
+          IMAGE: ${{ needs.publish.outputs.image }}
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -142,7 +149,7 @@ jobs:
           fi
           NOTES_FILE="$(mktemp)"
           if [ -n "$DIGEST" ]; then
-            printf 'Container image: `ghcr.io/szotasz/marveen:%s` (`ghcr.io/szotasz/marveen@%s`)\n\n' "$TAG" "$DIGEST" > "$NOTES_FILE"
+            printf 'Container image: `%s@%s`\n\n' "$IMAGE" "$DIGEST" > "$NOTES_FILE"
             gh release create "$TAG" --verify-tag --generate-notes --notes-file "$NOTES_FILE"
           else
             gh release create "$TAG" --verify-tag --generate-notes

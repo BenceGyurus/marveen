@@ -66,7 +66,6 @@ const {
   readEnvFile,
   updateEnvFile,
   writeEnvFileFresh,
-  invalidateEnvFileCache,
 } = await import('../env.js')
 const { serveFile, etagMatches, jsonMaybeGzip } = await import('../web/http-helpers.js')
 const { tryHandleStatic } = await import('../web/routes/static.js')
@@ -279,7 +278,7 @@ describe('HTTP static serving, Brotli, HEAD, Content-Length & route dispatch', (
   })
 })
 
-describe('env.ts mtime cache, defensive copy, and invalidation', () => {
+describe('env.ts parse cache, defensive copy, and invalidation', () => {
   it('caches reads, returns defensive copies, and invalidates on updates or external writes', () => {
     const envPath = join(ENV_SANDBOX, '.env')
     writeFileSync(envPath, 'FOO=alpha\nBAR=one\n')
@@ -300,7 +299,6 @@ describe('env.ts mtime cache, defensive copy, and invalidation', () => {
     expect(readEnvFile().EXTERNAL).toBe('delta_external_payload')
 
     rmSync(envPath, { force: true })
-    invalidateEnvFileCache()
     expect(readEnvFile()).toEqual({})
   })
 })

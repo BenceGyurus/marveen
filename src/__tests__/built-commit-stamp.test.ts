@@ -41,9 +41,9 @@ function run(root: string): { status: number; out: string } {
 }
 
 describe('build stamps dist/.built-commit (BUILTSTAMPKEZI920)', () => {
-  it('STATIC: the build script chains the stamp behind tsc with &&, so a failed compile never stamps', () => {
+  it('stamps only after TypeScript and web assets build successfully', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { scripts: Record<string, string> }
-    expect(pkg.scripts.build).toBe('tsc && node scripts/write-built-commit.cjs')
+    expect(pkg.scripts.build).toBe('tsc && node scripts/build-web-assets.mjs && node scripts/write-built-commit.cjs')
     // `;` or `||` here would stamp a half-built dist as fresh -- the blinding case.
     expect(pkg.scripts.build).not.toMatch(/tsc\s*;/)
   })

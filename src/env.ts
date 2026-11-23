@@ -11,40 +11,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 // time; production never sets it.
 const PROJECT_ROOT = process.env.CLAUDECLAW_ENV_DIR ?? join(__dirname, '..')
 
-interface EnvFileCacheEntry {
-  envPath: string
-  mtimeMs: number
-  ctimeMs: number
-  size: number
-  ino: number
-  parsed: Record<string, string>
-}
-
-let envFileCache: EnvFileCacheEntry | null = null
-
-export function invalidateEnvFileCache(): void {
-  envFileCache = null
-}
+let parsedEnvCache: { content: string; parsed: Record<string, string> } | null = null
 
 function readAllEnvCached(envPath: string): Record<string, string> | null {
   try {
-    const st = statSync(envPath)
-    if (
-      envFileCache &&
-      envFileCache.envPath === envPath &&
-      envFileCache.mtimeMs === st.mtimeMs &&
-      envFileCache.ctimeMs === st.ctimeMs &&
-      envFileCache.size === st.size &&
-      envFileCache.ino === st.ino
-    ) {
-      return envFileCache.parsed
-    }
     const content = readFileSync(envPath, 'utf-8')
+    // Filesystems can assign the same timestamps to consecutive in-place edits.
+    if (parsedEnvCache?.content === content) return parsedEnvCache.parsed
     const parsed = parseEnvContent(content)
-    envFileCache = { envPath, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs, size: st.size, ino: st.ino, parsed }
+    parsedEnvCache = { content, parsed }
     return parsed
   } catch {
-    envFileCache = null
+    parsedEnvCache = null
     return null
   }
 }
@@ -72,7 +50,7 @@ export const ENV_FILE_MODE = 0o600
 // still holding the old file open does not see them.
 export function writeEnvFileFresh(envPath: string, content: string): void {
   atomicWriteFileSync(envPath, content, { mode: ENV_FILE_MODE })
-  invalidateEnvFileCache()
+  parsedEnvCache = null
 }
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -146,5 +124,5 @@ export function updateEnvFile(updates: Record<string, string>): void {
   let mode = ENV_FILE_MODE
   try { mode = statSync(envPath).mode & 0o777 } catch { /* no .env yet */ }
   atomicWriteFileSync(envPath, out.join('\n'), { mode })
-  invalidateEnvFileCache()
+  parsedEnvCache = null
 }
