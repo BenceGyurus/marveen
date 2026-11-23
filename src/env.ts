@@ -11,16 +11,54 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 // time; production never sets it.
 const PROJECT_ROOT = process.env.CLAUDECLAW_ENV_DIR ?? join(__dirname, '..')
 
+interface EnvFileCacheEntry {
+  envPath: string
+  mtimeMs: number
+  ctimeMs: number
+  size: number
+  ino: number
+  parsed: Record<string, string>
+}
+
+let envFileCache: EnvFileCacheEntry | null = null
+
+export function invalidateEnvFileCache(): void {
+  envFileCache = null
+}
+
+function readAllEnvCached(envPath: string): Record<string, string> | null {
+  try {
+    const st = statSync(envPath)
+    if (
+      envFileCache &&
+      envFileCache.envPath === envPath &&
+      envFileCache.mtimeMs === st.mtimeMs &&
+      envFileCache.ctimeMs === st.ctimeMs &&
+      envFileCache.size === st.size &&
+      envFileCache.ino === st.ino
+    ) {
+      return envFileCache.parsed
+    }
+    const content = readFileSync(envPath, 'utf-8')
+    const parsed = parseEnvContent(content)
+    envFileCache = { envPath, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs, size: st.size, ino: st.ino, parsed }
+    return parsed
+  } catch {
+    envFileCache = null
+    return null
+  }
+}
+
 export function readEnvFile(keys?: string[]): Record<string, string> {
   const envPath = join(PROJECT_ROOT, '.env')
-  let content: string
-  try {
-    content = readFileSync(envPath, 'utf-8')
-  } catch {
-    return {}
+  const all = readAllEnvCached(envPath)
+  if (!all) return {}
+  if (!keys) return { ...all }
+  const out: Record<string, string> = {}
+  for (const k of keys) {
+    if (Object.hasOwn(all, k)) out[k] = all[k]!
   }
-
-  return parseEnvContent(content, keys)
+  return out
 }
 
 // The mode a newly created .env gets: it holds secrets, and install-macos.sh /
@@ -34,6 +72,7 @@ export const ENV_FILE_MODE = 0o600
 // still holding the old file open does not see them.
 export function writeEnvFileFresh(envPath: string, content: string): void {
   atomicWriteFileSync(envPath, content, { mode: ENV_FILE_MODE })
+  invalidateEnvFileCache()
 }
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -107,4 +146,5 @@ export function updateEnvFile(updates: Record<string, string>): void {
   let mode = ENV_FILE_MODE
   try { mode = statSync(envPath).mode & 0o777 } catch { /* no .env yet */ }
   atomicWriteFileSync(envPath, out.join('\n'), { mode })
+  invalidateEnvFileCache()
 }

@@ -95,8 +95,8 @@ test.describe('BRIDGEHU813 -- the pairing error in a real browser', () => {
 
     await page.fill('#authBridgeKeyLine', BAD_LINE)
     await page.fill('#authBridgeName', 'Szabi laptopja')
-    page.once('dialog', (d) => d.accept())
     await page.click('#authBridgeEnrollBtn')
+    await page.getByRole('dialog').getByRole('button', { name: /^(Pair|Párosítás)$/ }).click()
 
     const msg = page.locator('#authBridgeMsg')
     await expect(msg).toHaveClass(/err/)
@@ -116,8 +116,8 @@ test.describe('BRIDGEHU813 -- the pairing error in a real browser', () => {
 
     await page.fill('#authBridgeKeyLine', BAD_LINE)
     await page.fill('#authBridgeName', 'Szabi laptop')
-    page.once('dialog', (d) => d.accept())
     await page.click('#authBridgeEnrollBtn')
+    await page.getByRole('dialog').getByRole('button', { name: /^(Pair|Párosítás)$/ }).click()
 
     const msg = page.locator('#authBridgeMsg')
     await expect(msg).toHaveClass(/err/)
@@ -144,8 +144,8 @@ test.describe('BRIDGEHU813 -- the pairing error in a real browser', () => {
     await showPairingPanel(page)
     await page.fill('#authBridgeKeyLine', BAD_LINE)
     await page.fill('#authBridgeName', 'Teszt')
-    page.once('dialog', (d) => d.accept())
     await page.click('#authBridgeEnrollBtn')
+    await page.getByRole('dialog').getByRole('button', { name: /^(Pair|Párosítás)$/ }).click()
     const msg = page.locator('#authBridgeMsg')
     await expect(msg).toHaveClass(/err/)
     expect((await msg.innerText()).trim()).toBe('a sentence no language file knows')

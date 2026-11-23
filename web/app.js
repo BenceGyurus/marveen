@@ -781,11 +781,6 @@ document.addEventListener('DOMContentLoaded', () => {
   renderNav()
   renderStaticI18n()
 }, { once: true })
-// Fallback if DOMContentLoaded already fired (scripts deferred).
-if (document.readyState !== 'loading') {
-  renderNav()
-  renderStaticI18n()
-}
 
 // ============================================================
 // === Activity (live agent status) ===
@@ -4173,25 +4168,37 @@ async function setupContextGuardUI(agentName) {
   updateContextGuardLiveStatus(agentName)
 }
 
-function updateContextGuardLiveStatus(agentName) {
+function updateContextGuardLiveStatus(agentName, prefetchedBody) {
   const liveEl = document.getElementById('cgLiveStatus')
   const phaseEl = document.getElementById('cgPhaseDisplay')
   const pctEl = document.getElementById('cgPctDisplay')
   if (!liveEl || !phaseEl || !pctEl) return
+  const applyBody = (body) => {
+    if (!body || !Array.isArray(body.agents)) return
+    const entry = body.agents.find(a => a.agent === agentName)
+    if (!entry) return
+    liveEl.style.display = ''
+    phaseEl.textContent = CG_PHASE_LABELS[entry.phase] || entry.phase || '-'
+    pctEl.textContent = typeof entry.pct === 'number' ? Math.round(entry.pct * 100) + '%' : '-'
+  }
+  if (prefetchedBody) {
+    applyBody(prefetchedBody)
+    return
+  }
   fetch('/api/context-guard')
     .then(r => r.ok ? r.json() : null)
-    .then(body => {
-      if (!body || !Array.isArray(body.agents)) return
-      const entry = body.agents.find(a => a.agent === agentName)
-      if (!entry) return
-      liveEl.style.display = ''
-      phaseEl.textContent = CG_PHASE_LABELS[entry.phase] || entry.phase || '-'
-      pctEl.textContent = typeof entry.pct === 'number' ? Math.round(entry.pct * 100) + '%' : '-'
-    })
+    .then(applyBody)
     .catch(() => {})
 }
 
 ;(function startContextGuardPoll() {
+  function isCgPollRelevant() {
+    if (document.hidden) return false
+    const agentsPage = document.getElementById('agentsPage')
+    if (agentsPage && !agentsPage.hidden) return true
+    const liveEl = document.getElementById('cgLiveStatus')
+    return !!(liveEl && liveEl.offsetParent !== null)
+  }
   function poll() {
     fetch('/api/context-guard')
       .then(r => r.ok ? r.json() : null)
@@ -4226,12 +4233,23 @@ function updateContextGuardLiveStatus(agentName) {
           badge.title = cgTipKey ? t(cgTipKey) : ''
         })
         if (currentAgent && document.getElementById('cgLiveStatus')) {
-          updateContextGuardLiveStatus(currentAgent.autoRestartId || currentAgent.name)
+          updateContextGuardLiveStatus(currentAgent.autoRestartId || currentAgent.name, body)
         }
       })
       .catch(() => {})
   }
-  setInterval(poll, 30_000)
+  let cgMissed = false
+  setInterval(() => {
+    if (!isCgPollRelevant()) { cgMissed = true; return }
+    cgMissed = false
+    poll()
+  }, 30_000)
+  document.addEventListener('visibilitychange', () => {
+    if (cgMissed && isCgPollRelevant()) {
+      cgMissed = false
+      poll()
+    }
+  })
 })()
 
 document.getElementById('saveContextGuardBtn').addEventListener('click', async () => {
@@ -16245,10 +16263,21 @@ document.getElementById('updatesApplyBtn').addEventListener('click', async () =>
   await runUpdate(false)
 })
 
-// Poll the badge on startup and every 5 min so the nav link reflects
-// the cached status even on tabs other than the Updates page.
+// Poll the badge on startup and every 5 min while the tab is visible so the nav
+// link reflects the cached status without waking background tabs.
+let _updatesBadgeMissed = false
 pollUpdatesBadge()
-setInterval(pollUpdatesBadge, 5 * 60_000)
+setInterval(() => {
+  if (document.hidden) { _updatesBadgeMissed = true; return }
+  _updatesBadgeMissed = false
+  pollUpdatesBadge()
+}, 5 * 60_000)
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && _updatesBadgeMissed) {
+    _updatesBadgeMissed = false
+    pollUpdatesBadge()
+  }
+})
 
 // === First-run onboarding wizard ===
 // Full-screen overlay shown when /api/onboarding/status reports the install
@@ -17117,6 +17146,8 @@ function esc(s) {
 
 let bgInitialized = false
 let bgRefreshTimer = null
+let bgTasksMissed = false
+let bgVisibilityWired = false
 
 async function loadBgTasksPage() {
   if (!bgInitialized) {
@@ -17143,9 +17174,30 @@ async function loadBgTasksPage() {
     document.getElementById('bgPrompt').addEventListener('keydown', e => { if (e.key === 'Enter') startBgTask() })
     document.getElementById('bgShowAll').addEventListener('change', loadBgTasks)
   }
+  if (!bgVisibilityWired) {
+    bgVisibilityWired = true
+    document.addEventListener('visibilitychange', () => {
+      const page = document.getElementById('bgTasksPage')
+      if (!document.hidden && bgTasksMissed && (!page || !page.hidden)) {
+        bgTasksMissed = false
+        loadBgTasks()
+      }
+    })
+  }
   loadBgTasks()
   if (bgRefreshTimer) clearInterval(bgRefreshTimer)
-  bgRefreshTimer = setInterval(loadBgTasks, 10000)
+  bgTasksMissed = false
+  bgRefreshTimer = setInterval(() => {
+    const page = document.getElementById('bgTasksPage')
+    if (page && page.hidden) {
+      clearInterval(bgRefreshTimer)
+      bgRefreshTimer = null
+      return
+    }
+    if (document.hidden) { bgTasksMissed = true; return }
+    bgTasksMissed = false
+    loadBgTasks()
+  }, 10000)
 }
 
 async function startBgTask() {
@@ -18212,8 +18264,19 @@ function wireFleetFreeze() {
       showToast(t('fleet_freeze.toast.unfrozen'))
     } catch (err) { showToast(String(err.message || err)) }
   })
+  let fleetFreezeMissed = false
   pollFleetFreeze()
-  setInterval(pollFleetFreeze, FLEET_FREEZE_POLL_MS)
+  setInterval(() => {
+    if (document.hidden) { fleetFreezeMissed = true; return }
+    fleetFreezeMissed = false
+    pollFleetFreeze()
+  }, FLEET_FREEZE_POLL_MS)
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && fleetFreezeMissed) {
+      fleetFreezeMissed = false
+      pollFleetFreeze()
+    }
+  })
 }
 
 // ONBOARDFOLLOW1107: Settings can be loaded again while a run still waits for /api/settings (opened twice, a language

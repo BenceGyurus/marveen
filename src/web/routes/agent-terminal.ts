@@ -16,6 +16,90 @@ import { exactTmuxTarget } from '../../tmux-target.js'
 // endpoint accepts the token via ?token= because EventSource cannot set
 // headers -- see the auth gate in web.ts). Szabi 2026-06-03.
 
+const STREAM_POLL_INTERVAL_MS = 700
+const STREAM_KEEPALIVE_MS = 15_000
+
+interface StreamSubscriber {
+  write: (chunk: string) => boolean
+  close: () => void
+  lastPayload: string | null
+  lastSentAt: number
+}
+
+interface TerminalStreamHub {
+  session: string
+  subscribers: Set<StreamSubscriber>
+  timer: ReturnType<typeof setInterval> | null
+  inFlight: boolean
+  closed: boolean
+  latest: string | null
+  poll: () => void
+}
+
+const terminalStreamHubs = new Map<string, TerminalStreamHub>()
+
+export function resetTerminalStreamHubsForTests(): void {
+  for (const hub of terminalStreamHubs.values()) {
+    hub.closed = true
+    if (hub.timer) clearInterval(hub.timer)
+  }
+  terminalStreamHubs.clear()
+}
+
+function getOrCreateTerminalHub(session: string): TerminalStreamHub {
+  const existing = terminalStreamHubs.get(session)
+  if (existing && !existing.closed) return existing
+
+  const hub: TerminalStreamHub = {
+    session,
+    subscribers: new Set(),
+    timer: null,
+    inFlight: false,
+    closed: false,
+    latest: null,
+    poll: () => {
+      if (hub.closed || hub.inFlight || hub.subscribers.size === 0) return
+      hub.inFlight = true
+      const capture = tmuxInvocationFor(['capture-pane', '-t', exactTmuxTarget(session), '-S', '-2000', '-e', '-p'])
+      execFile(capture.file, capture.args, { timeout: 3000, encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+        if (hub.closed || hub.subscribers.size === 0) {
+          hub.inFlight = false
+          return
+        }
+        const pane = err ? '' : (stdout ?? '')
+        const publish = (running: boolean): void => {
+          hub.inFlight = false
+          if (hub.closed || hub.subscribers.size === 0) return
+          const payload = JSON.stringify({ pane, running })
+          hub.latest = payload
+          const frame = `data: ${payload}\n\n`
+          const now = Date.now()
+          for (const sub of [...hub.subscribers]) {
+            if (sub.lastPayload !== payload) {
+              if (sub.write(frame)) {
+                sub.lastPayload = payload
+                sub.lastSentAt = now
+              } else {
+                sub.close()
+              }
+            } else if (now - sub.lastSentAt >= STREAM_KEEPALIVE_MS) {
+              if (sub.write(': keepalive\n\n')) {
+                sub.lastSentAt = now
+              } else {
+                sub.close()
+              }
+            }
+          }
+        }
+        if (err) void isTmuxSessionAlive(session).then(publish)
+        else publish(true)
+      })
+    },
+  }
+  terminalStreamHubs.set(session, hub)
+  return hub
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -163,8 +247,8 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
     // The client can go away while resolveTarget awaits tmux; listen first, so a
     // close during that await is not missed (it would leave the ticks running).
     let closed = false
-    let interval: ReturnType<typeof setInterval> | undefined
-    const stop = (): void => { closed = true; if (interval) clearInterval(interval) }
+    let cleanup = (): void => { closed = true }
+    const stop = (): void => { cleanup() }
     ctx.req.on('close', stop)
     ctx.req.on('error', stop)
     const target = await resolveTarget(name)
@@ -179,46 +263,52 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
       'X-Accel-Buffering': 'no',
     })
 
-    let inFlight = false
-    const tick = (): void => {
-      if (closed || inFlight) return // skip if a slow capture is still running
-      inFlight = true
-      // ASYNC execFile (arg array) -- NOT execSync: a setInterval execSync would
-      // block the WHOLE dashboard event loop for up to the tmux timeout on every
-      // tick, freezing all other HTTP requests. The arg array also avoids shell
-      // interpolation of `session`. -e keeps ANSI so xterm renders faithfully;
-      // -p prints. `-S -2000` includes 2000 lines of scrollback history (not just
-      // the visible pane) so the frontend can offer scroll-back; the frontend
-      // repaints the full snapshot (clear-scrollback + clear + home) each changed
-      // frame and only when the user is at the bottom, so scrolling up is stable.
-      // Same resolution as the write path: for a per-user agent the pane lives on
-      // that user's tmux server, and a raw binary call returns nothing -- which
-      // the stream renders as a blank terminal rather than an error. That blank
-      // pane is what the operator reported as "nem jelenit meg semmit".
-      const capture = tmuxInvocationFor(['capture-pane', '-t', exactTmuxTarget(session), '-S', '-2000', '-e', '-p'])
-      execFile(capture.file, capture.args, { timeout: 3000, encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
-        if (closed) { inFlight = false; return }
-        const pane = err ? '' : (stdout ?? '')
-        // The tick stays in flight until the probe answers, so a slow probe
-        // never overlaps the next tick.
-        const send = (running: boolean): void => {
-          inFlight = false
-          if (closed) return
-          try {
-            res.write(`data: ${JSON.stringify({ pane, running })}\n\n`)
-          } catch {
-            closed = true
-          }
+    const hub = getOrCreateTerminalHub(session)
+    const subscriber: StreamSubscriber = {
+      write: (chunk: string) => {
+        if (closed) return false
+        try {
+          res.write(chunk)
+          return true
+        } catch {
+          return false
         }
-        // A successful capture proves the session is alive; only re-probe on
-        // capture failure (cheap, and avoids a has-session call every tick).
-        if (err) void isTmuxSessionAlive(session).then(send)
-        else send(true)
-      })
+      },
+      close: () => { cleanup() },
+      lastPayload: null,
+      lastSentAt: Date.now(),
     }
 
-    tick()
-    interval = setInterval(tick, 700)
+    cleanup = (): void => {
+      if (closed) return
+      closed = true
+      hub.subscribers.delete(subscriber)
+      if (hub.subscribers.size === 0) {
+        hub.closed = true
+        if (hub.timer) {
+          clearInterval(hub.timer)
+          hub.timer = null
+        }
+        if (terminalStreamHubs.get(session) === hub) {
+          terminalStreamHubs.delete(session)
+        }
+      }
+    }
+
+    hub.subscribers.add(subscriber)
+    if (hub.latest !== null) {
+      if (subscriber.write(`data: ${hub.latest}\n\n`)) {
+        subscriber.lastPayload = hub.latest
+        subscriber.lastSentAt = Date.now()
+      } else {
+        cleanup()
+        return true
+      }
+    }
+    if (!hub.timer) {
+      hub.poll()
+      hub.timer = setInterval(hub.poll, STREAM_POLL_INTERVAL_MS)
+    }
     return true
   }
 

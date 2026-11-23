@@ -68,6 +68,8 @@ Minden `POST /api/daily-log` bejegyzés ugyanabban az SQLite-tranzakcióban egy 
 
 ### Dátumszűrő a keresésen
 
+Dátumos visszakeresésnél például a `GET /api/recall?agent=agent-a&date=tegnap&q=szállítás&limit=5` legfeljebb öt naplóbejegyzést és öt emléket ad vissza. A találatok mindkét listában időrendben érkeznek. A `hasMore.logs` és a `hasMore.memories` külön jelzi, maradt-e további egyezés. Az explicit korlát listánként legfeljebb 200. A `limit=0` csak az egyezések létezését jelzi. A korlát elhagyásával a teljes dátumtartomány találatai érkeznek.
+
 `GET /api/memories` három paramétert fogad el, mind az `Europe/Budapest` (telepítési zóna) naptári napjaira vonatkozik, a határok zárt intervallumok (00:00:00 - 23:59:59 helyi idő, az óraállítás napján is: 2026-10-25 25 órás nap):
 
 | Paraméter | Érték |

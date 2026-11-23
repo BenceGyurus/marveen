@@ -2,6 +2,7 @@ import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs'
 import { extname, join, sep } from 'node:path'
 import { atomicWriteFileSync } from '../atomic-write.js'
 import { json, readBody, RequestBodyTooLargeError, serveFile } from '../http-helpers.js'
+import { resolveWebAssetPath } from './static.js'
 import { createAgentMessage } from '../../db.js'
 import { PROJECT_ROOT } from '../../config.js'
 import { readEnvFile } from '../../env.js'
@@ -77,11 +78,11 @@ export async function tryHandleVideoReview(ctx: RouteContext, webDir: string): P
   const { path, method, url, res } = ctx
 
   if (path === '/video-review' && (method === 'GET' || method === 'HEAD')) {
-    serveFile(ctx.req, res, join(webDir, 'video-review.html'))
+    serveFile(ctx.req, res, join(webDir, 'video-review.html'), { allowBrotli: true })
     return true
   }
   if (path === '/video-review.js' && method === 'GET') {
-    serveFile(ctx.req, res, join(webDir, 'video-review.js'))
+    serveFile(ctx.req, res, resolveWebAssetPath(webDir, 'video-review.js'), { allowBrotli: true })
     return true
   }
   if (!path.startsWith('/api/video-review/')) return false

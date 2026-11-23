@@ -128,6 +128,7 @@ import { tryHandleFleet } from './web/routes/fleet.js'
 import { tryHandleVaultSshKeys } from './web/routes/vault-ssh-keys.js'
 import { tryHandleCustomProviders } from './web/routes/custom-providers.js'
 import type { RouteContext } from './web/routes/types.js'
+import { extractApiPrefix } from './web/route-dispatch.js'
 import { isMalformedBodyError } from './web/malformed-body.js'
 
 const WEB_DIR = join(PROJECT_ROOT, 'web')
@@ -237,71 +238,208 @@ export function startWebServer(port = 3420): http.Server {
     try {
       const routeCtx: RouteContext = { req, res, path, method, url, fedPeer: fedPeerForCtx, auth: ctxAuth }
 
-      if (await tryHandleAuth(routeCtx)) return
-      if (await tryHandleOperatorAccess(routeCtx)) return
-      if (await tryHandleOperator(routeCtx, WEB_DIR)) return
-      if (await tryHandleSupportAccess(routeCtx)) return
-      if (await tryHandleSecurity(routeCtx)) return
-      if (await tryHandleBridgeServicePorts(routeCtx)) return
-      if (await tryHandleProfiles(routeCtx)) return
-      if (await tryHandleMessages(routeCtx)) return
-      if (await tryHandleFederation(routeCtx)) return
-      if (await tryHandleDailyLog(routeCtx)) return
-      if (await tryHandlePrLedger(routeCtx)) return
-      if (await tryHandleOpensourceInventory(routeCtx)) return
-      if (await tryHandleCliInventory(routeCtx)) return
-      if (await tryHandleHomoglyphs(routeCtx)) return
-      if (await tryHandleMemories(routeCtx)) return
-      if (await tryHandleMigrate(routeCtx)) return
-      if (await tryHandleKanban(routeCtx)) return
-      if (await tryHandleKanbanProjects(routeCtx)) return
-      if (await tryHandleHeartbeat(routeCtx)) return
-      if (await tryHandleSchedules(routeCtx)) return
-      if (await tryHandleConnectorsHu(routeCtx)) return
-      if (await tryHandleConnectors(routeCtx)) return
-      if (await tryHandleDocs(routeCtx)) return
-      if (await tryHandleResearch(routeCtx)) return
-      if (await tryHandleAgentsSkills(routeCtx)) return
-      if (await tryHandleReviewAction(routeCtx)) return
-      if (await tryHandleSkills(routeCtx)) return
-      if (await tryHandleAgentTerminal(routeCtx)) return
-      if (await tryHandleAgentConversation(routeCtx)) return
-      if (await tryHandleAgentTaskState(routeCtx)) return
-      if (await tryHandleAgents(routeCtx, WEB_DIR)) return
-      if (await tryHandleClaudePlansLogin(routeCtx)) return
-      if (await tryHandleClaudePlans(routeCtx)) return
-      if (await tryHandleMarveen(routeCtx, WEB_DIR)) return
-      if (await tryHandleBackgroundTasks(routeCtx)) return
-      if (await tryHandleRecall(routeCtx)) return
-      if (await tryHandleOverview(routeCtx)) return
-      if (await tryHandleUpdates(routeCtx)) return
-      if (await tryHandleOnboarding(routeCtx)) return
-      if (await tryHandleStatus(routeCtx)) return
-      if (await tryHandleCommands(routeCtx)) return
-      if (await tryHandleCustomCommands(routeCtx)) return
-      if (await tryHandleAutonomy(routeCtx)) return
-      if (await tryHandleApprovals(routeCtx)) return
-      if (await tryHandleDesktopLock(routeCtx)) return
-      if (await tryHandleFleetFreeze(routeCtx)) return
-      if (await tryHandleGromzo(routeCtx)) return
-      if (await tryHandleTokenUsage(routeCtx)) return
-      if (await tryHandleCosts(routeCtx)) return
-      if (await tryHandleIdeas(routeCtx)) return
-      if (await tryHandleNotes(routeCtx)) return
-      if (await tryHandlePdfRender(routeCtx)) return
-      if (await tryHandleVideoReview(routeCtx, WEB_DIR)) return
-      if (await tryHandleSpans(routeCtx)) return
-      if (await tryHandleToolLog(routeCtx)) return
-      if (await tryHandleSkillUsage(routeCtx)) return
-      if (await tryHandleSettings(routeCtx)) return
-      if (await tryHandleVoice(routeCtx)) return
-      if (await tryHandleVaultSshKeys(routeCtx)) return
-      if (await tryHandleVaultSsh(routeCtx)) return
-      if (await tryHandleCustomProviders(routeCtx)) return
-      if (await tryHandleAuditLog(routeCtx)) return
-      if (await tryHandleFleetQ(routeCtx)) return
-      if (await tryHandleFleet(routeCtx)) return
-      if (await tryHandleStatic(routeCtx, WEB_DIR)) return
+      if (path.startsWith('/api/')) {
+        switch (extractApiPrefix(path)) {
+          case 'auth':
+            if (await tryHandleAuth(routeCtx)) return
+            break
+          case 'operator-access':
+            if (await tryHandleOperatorAccess(routeCtx)) return
+            break
+          case 'operator':
+            if (await tryHandleOperator(routeCtx, WEB_DIR)) return
+            break
+          case 'support-access':
+            if (await tryHandleSupportAccess(routeCtx)) return
+            break
+          case 'security':
+            if (await tryHandleSecurity(routeCtx)) return
+            break
+          case 'bridge':
+            if (await tryHandleBridgeServicePorts(routeCtx)) return
+            break
+          case 'profiles':
+            if (await tryHandleProfiles(routeCtx)) return
+            break
+          case 'messages':
+            if (await tryHandleMessages(routeCtx)) return
+            break
+          case 'federation':
+            if (await tryHandleFederation(routeCtx)) return
+            break
+          case 'daily-log':
+            if (await tryHandleDailyLog(routeCtx)) return
+            break
+          case 'pr-ledger':
+            if (await tryHandlePrLedger(routeCtx)) return
+            break
+          case 'opensource-inventory':
+            if (await tryHandleOpensourceInventory(routeCtx)) return
+            break
+          case 'cli-inventory':
+            if (await tryHandleCliInventory(routeCtx)) return
+            break
+          case 'homoglyphs':
+            if (await tryHandleHomoglyphs(routeCtx)) return
+            break
+          case 'memories':
+            if (await tryHandleMemories(routeCtx)) return
+            break
+          case 'migrate':
+            if (await tryHandleMigrate(routeCtx)) return
+            break
+          case 'kanban':
+            if (await tryHandleKanban(routeCtx)) return
+            break
+          case 'kanban-projects':
+            if (await tryHandleKanban(routeCtx)) return
+            if (await tryHandleKanbanProjects(routeCtx)) return
+            break
+          case 'heartbeat':
+            if (await tryHandleHeartbeat(routeCtx)) return
+            break
+          case 'schedules':
+            if (await tryHandleSchedules(routeCtx)) return
+            break
+          case 'connectors-hu':
+            if (await tryHandleConnectorsHu(routeCtx)) return
+            break
+          case 'connectors':
+          case 'mcp-catalog':
+          case 'ollama':
+            if (await tryHandleConnectors(routeCtx)) return
+            break
+          case 'docs':
+            if (await tryHandleDocs(routeCtx)) return
+            break
+          case 'research':
+            if (await tryHandleResearch(routeCtx)) return
+            break
+          case 'review-action':
+            if (await tryHandleReviewAction(routeCtx)) return
+            break
+          case 'skills':
+            if (await tryHandleSkills(routeCtx)) return
+            break
+          case 'agents':
+            if (await tryHandleAgentsSkills(routeCtx)) return
+            if (await tryHandleAgentTerminal(routeCtx)) return
+            if (await tryHandleAgentConversation(routeCtx)) return
+            if (await tryHandleAgents(routeCtx, WEB_DIR)) return
+            if (await tryHandleFleetQ(routeCtx)) return
+            break
+          case 'terminal-input':
+            if (await tryHandleAgentTerminal(routeCtx)) return
+            break
+          case 'agent-taskstate':
+            if (await tryHandleAgentTaskState(routeCtx)) return
+            break
+          case 'models':
+          case 'openrouter':
+          case 'context-guard':
+          case 'team':
+            if (await tryHandleAgents(routeCtx, WEB_DIR)) return
+            break
+          case 'claude-plans':
+            if (await tryHandleClaudePlansLogin(routeCtx)) return
+            if (await tryHandleClaudePlans(routeCtx)) return
+            break
+          case 'marveen':
+            if (await tryHandleMarveen(routeCtx, WEB_DIR)) return
+            break
+          case 'background-tasks':
+            if (await tryHandleBackgroundTasks(routeCtx)) return
+            break
+          case 'recall':
+            if (await tryHandleRecall(routeCtx)) return
+            break
+          case 'overview':
+            if (await tryHandleOverview(routeCtx)) return
+            break
+          case 'updates':
+            if (await tryHandleUpdates(routeCtx)) return
+            break
+          case 'onboarding':
+            if (await tryHandleOnboarding(routeCtx)) return
+            break
+          case 'status':
+            if (await tryHandleStatus(routeCtx)) return
+            break
+          case 'commands':
+            if (await tryHandleCommands(routeCtx)) return
+            break
+          case 'custom-commands':
+            if (await tryHandleCustomCommands(routeCtx)) return
+            break
+          case 'autonomy':
+            if (await tryHandleAutonomy(routeCtx)) return
+            break
+          case 'approvals':
+            if (await tryHandleApprovals(routeCtx)) return
+            break
+          case 'desktop-lock':
+            if (await tryHandleDesktopLock(routeCtx)) return
+            break
+          case 'fleet':
+            if (await tryHandleFleetFreeze(routeCtx)) return
+            if (await tryHandleFleet(routeCtx)) return
+            break
+          case 'gromzo':
+            if (await tryHandleGromzo(routeCtx)) return
+            break
+          case 'token-usage':
+            if (await tryHandleTokenUsage(routeCtx)) return
+            break
+          case 'costs':
+            if (await tryHandleCosts(routeCtx)) return
+            break
+          case 'ideas':
+            if (await tryHandleIdeas(routeCtx)) return
+            break
+          case 'notes':
+            if (await tryHandleNotes(routeCtx)) return
+            break
+          case 'pdf':
+            if (await tryHandlePdfRender(routeCtx)) return
+            break
+          case 'video-review':
+            if (await tryHandleVideoReview(routeCtx, WEB_DIR)) return
+            break
+          case 'spans':
+          case 'traces':
+            if (await tryHandleSpans(routeCtx)) return
+            break
+          case 'tool-log':
+            if (await tryHandleToolLog(routeCtx)) return
+            break
+          case 'skill-usage':
+            if (await tryHandleSkillUsage(routeCtx)) return
+            break
+          case 'settings':
+            if (await tryHandleSettings(routeCtx)) return
+            break
+          case 'voice':
+            if (await tryHandleVoice(routeCtx)) return
+            break
+          case 'vault':
+            if (await tryHandleConnectors(routeCtx)) return
+            if (await tryHandleVaultSshKeys(routeCtx)) return
+            if (await tryHandleVaultSsh(routeCtx)) return
+            break
+          case 'custom-providers':
+            if (await tryHandleCustomProviders(routeCtx)) return
+            break
+          case 'audit-log':
+            if (await tryHandleAuditLog(routeCtx)) return
+            break
+        }
+      } else if (path.startsWith('/.well-known/')) {
+        if (await tryHandleFleetQ(routeCtx)) return
+      } else {
+        if (await tryHandleOperator(routeCtx, WEB_DIR)) return
+        if (await tryHandleVideoReview(routeCtx, WEB_DIR)) return
+        if (await tryHandleStatic(routeCtx, WEB_DIR)) return
+      }
 
       res.writeHead(404)
       res.end('Not found')

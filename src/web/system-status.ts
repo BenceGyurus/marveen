@@ -12,7 +12,8 @@
 //   - the local part is cached for 60 s.
 
 import { execFile } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, statSync, statfsSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { readdir, stat, statfs } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { PROJECT_ROOT, STORE_DIR, MAIN_AGENT_ID, APP_TZ } from '../config.js'
@@ -313,13 +314,24 @@ export function configuredModelWithSource(): { model: string; source: string } {
   return { model, source: 'szállított alapérték' }
 }
 
-function dirSizeBytes(dir: string, budget = { entries: 50_000 }): number {
+async function dirSizeBytesAsync(dir: string, budget = { entries: 50_000 }): Promise<number> {
   let total = 0
-  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+  const ents = await readdir(dir, { withFileTypes: true })
+  const filePaths: string[] = []
+  const subDirs: string[] = []
+  for (const ent of ents) {
     if (--budget.entries < 0) throw new Error('túl sok fájl a méréshez')
     const p = join(dir, ent.name)
-    if (ent.isDirectory()) total += dirSizeBytes(p, budget)
-    else if (ent.isFile()) total += statSync(p).size
+    if (ent.isDirectory()) subDirs.push(p)
+    else if (ent.isFile()) filePaths.push(p)
+  }
+  const CHUNK = 32
+  for (let i = 0; i < filePaths.length; i += CHUNK) {
+    const stats = await Promise.all(filePaths.slice(i, i + CHUNK).map(p => stat(p)))
+    for (const st of stats) total += st.size
+  }
+  for (const sub of subDirs) {
+    total += await dirSizeBytesAsync(sub, budget)
   }
   return total
 }
@@ -517,17 +529,17 @@ export function liveBlockSpecs(now = Date.now()): BlockSpec[] {
               ['Codex', resolveCliBinary('codex')],
               ['Antigravity', resolveCliBinary('agy')],
             ]
-            const found: string[] = []
-            for (const [name, bin] of entries) {
-              if (!bin) continue
+            const results = await Promise.all(entries.map(async ([name, bin]): Promise<string | null> => {
+              if (!bin) return null
               try {
                 const { stdout } = await execFileAsync(bin, ['--version'], { timeout: 10_000 })
                 const ver = stdout.trim().split('\n')[0] || 'telepítve'
-                found.push(`${name}: ${ver}`)
+                return `${name}: ${ver}`
               } catch {
-                found.push(`${name}: telepítve`)
+                return `${name}: telepítve`
               }
-            }
+            }))
+            const found = results.filter((r): r is string => r !== null)
             return found.length ? found.join(' · ') : 'nincs CLI telepítve'
           },
         },
@@ -540,12 +552,16 @@ export function liveBlockSpecs(now = Date.now()): BlockSpec[] {
         },
         {
           label: 'Tárhely', source: 'stat, statfs',
-          collect: () => {
+          collect: async () => {
             const db = getDbFileSizeMb()
-            const fs = statfsSync(STORE_DIR)
-            let store: string
-            try { store = mb(dirSizeBytes(STORE_DIR)) } catch (err) { store = notMeasurable(err instanceof Error ? err.message : String(err)) }
-            return `DB ${db === null ? notMeasurable('stat hiba') : `${db} MB`} · store ${store} · szabad ${mb(Number(fs.bavail) * Number(fs.bsize))}`
+            const [fs, storeResult] = await Promise.all([
+              statfs(STORE_DIR),
+              dirSizeBytesAsync(STORE_DIR).then(
+                bytes => mb(bytes),
+                err => notMeasurable(err instanceof Error ? err.message : String(err)),
+              ),
+            ])
+            return `DB ${db === null ? notMeasurable('stat hiba') : `${db} MB`} · store ${storeResult} · szabad ${mb(Number(fs.bavail) * Number(fs.bsize))}`
           },
         },
       ],
@@ -555,15 +571,29 @@ export function liveBlockSpecs(now = Date.now()): BlockSpec[] {
 
 const CACHE_MS = 60_000
 let cache: { at: number; value: SystemStatus } | null = null
+let inFlight: Promise<SystemStatus> | null = null
 
 export async function getSystemStatus(opts: { now?: number; specs?: BlockSpec[]; noCache?: boolean } = {}): Promise<SystemStatus> {
   const now = opts.now ?? Date.now()
   if (!opts.noCache && !opts.specs && cache && now - cache.at < CACHE_MS) return cache.value
-  const value = await runCollectors(opts.specs ?? liveBlockSpecs(now), now)
-  if (!opts.specs) cache = { at: now, value }
-  return value
+  if (!opts.noCache && !opts.specs && inFlight) return inFlight
+
+  const work = (async () => {
+    const value = await runCollectors(opts.specs ?? liveBlockSpecs(now), now)
+    if (!opts.specs) cache = { at: now, value }
+    return value
+  })()
+
+  if (!opts.noCache && !opts.specs) {
+    inFlight = work
+    work.finally(() => {
+      if (inFlight === work) inFlight = null
+    })
+  }
+  return work
 }
 
 export function _resetSystemStatusCacheForTest(): void {
   cache = null
+  inFlight = null
 }

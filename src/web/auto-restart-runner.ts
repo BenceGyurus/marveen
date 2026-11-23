@@ -8,6 +8,7 @@ import {
   agentSessionName,
   restartAgentProcess,
   capturePane,
+  withTmuxBatch,
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { respawnMainSessionFresh } from './channel-monitor.js'
@@ -128,7 +129,7 @@ async function performRestart(name: string, cfg: AutoRestartConfig): Promise<voi
   }
 }
 
-async function checkAgent(name: string, nowMs: number): Promise<void> {
+async function checkAgent(name: string, nowMs: number, prefetchedRunning?: boolean): Promise<void> {
   const cfg = readAutoRestartConfig(name)
   if (!cfg.enabled) {
     lastRestart.delete(name) // re-seed cleanly if re-enabled later
@@ -142,7 +143,10 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
   // (the core SSH-independence invariant). 'stopped' is also left alone (auto-
   // restart cycles running sessions on a schedule; it does not resurrect dead
   // ones, matching the prior local behavior).
-  if (name !== MAIN_AGENT_ID && agentRunState(name) !== 'running') return
+  const isUp = name === MAIN_AGENT_ID
+    ? true
+    : (prefetchedRunning ?? (agentRunState(name) === 'running'))
+  if (!isUp) return
 
   // ONE OWNER PER NIGHTLY RESTART.
   //
@@ -292,9 +296,11 @@ export function startAutoRestartRunner(): NodeJS.Timeout {
     tickRunning = true
     try {
       const now = Date.now()
+      const subNames = listAgentNames()
+      const runningSet = withTmuxBatch(() => new Set(subNames.filter(n => agentRunState(n) === 'running')))
       try { await checkAgent(MAIN_AGENT_ID, now) } catch (err) { logger.debug({ err }, 'auto-restart: main check error') }
-      for (const name of listAgentNames()) {
-        try { await checkAgent(name, now) } catch (err) { logger.debug({ err, agent: name }, 'auto-restart: agent check error') }
+      for (const name of subNames) {
+        try { await checkAgent(name, now, runningSet.has(name)) } catch (err) { logger.debug({ err, agent: name }, 'auto-restart: agent check error') }
       }
     } finally {
       tickRunning = false

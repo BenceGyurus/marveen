@@ -6,7 +6,7 @@ import { MAIN_AGENT_ID, PROJECT_ROOT, RESPAWN_ENABLED, APP_TZ } from '../config.
 import { makeLazyBinResolver } from '../platform.js'
 import { agentConfigRoot, listAgentNames } from './agent-config.js'
 import { resolveOauthTokenFileSetting } from './agent-oauth-token-file.js'
-import { isAgentRunning, capturePane, startAgentProcess } from './agent-process.js'
+import { isAgentRunning, capturePane, startAgentProcess, withTmuxBatch, prefetchPaneCaptures } from './agent-process.js'
 import { isRestartInFlight } from './restart-lock.js'
 import { quarantineFleetTokenIfDead } from './claude-credentials-guard.js'
 import { resolveAgentSession } from './channel-mcp-reconnect.js'
@@ -567,24 +567,29 @@ export function startReauthHealer(): NodeJS.Timeout | null {
     const quiet = isQuietHour(localHour(Date.now()))
     // Main agent: escalate-only (no autonomous /login into a live always-on
     // conversation). capturePane returns null when it is down -> spell ends.
-    try {
-      checkSession(MAIN_AGENT_ID, MAIN_CHANNELS_SESSION, true, quiet)
-    } catch (err) {
-      logger.debug({ err }, 'reauth-healer: main agent check error')
-    }
-    for (const name of listAgentNames()) {
-      const session = resolveAgentSession(name)
-      if (!isAgentRunning(name)) {
-        watchState.delete(session)
-        quietSuppressed.delete(session)
-        continue
-      }
+    withTmuxBatch(() => {
+      const subAgents = listAgentNames().map(name => ({ name, session: resolveAgentSession(name) }))
+      const runningSubs = subAgents.filter(a => isAgentRunning(a.name))
+      const runningSet = new Set(runningSubs.map(a => a.name))
+      prefetchPaneCaptures([MAIN_CHANNELS_SESSION, ...runningSubs.map(a => a.session)])
       try {
-        checkSession(name, session, false, quiet)
+        checkSession(MAIN_AGENT_ID, MAIN_CHANNELS_SESSION, true, quiet)
       } catch (err) {
-        logger.debug({ err, agent: name }, 'reauth-healer: agent check error')
+        logger.debug({ err }, 'reauth-healer: main agent check error')
       }
-    }
+      for (const { name, session } of subAgents) {
+        if (!runningSet.has(name)) {
+          watchState.delete(session)
+          quietSuppressed.delete(session)
+          continue
+        }
+        try {
+          checkSession(name, session, false, quiet)
+        } catch (err) {
+          logger.debug({ err, agent: name }, 'reauth-healer: agent check error')
+        }
+      }
+    })
     // First sweep after 06:00: one summary for the agents still dead now.
     // The summary counts as the alert, so the 30-min cadence restarts from it.
     flushQuietSummary(

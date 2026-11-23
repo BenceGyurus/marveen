@@ -5,6 +5,7 @@ import {
   recordMemoryUse, getMemoryUseSummaries, getMemoryUseTrackingStart,
   getMemoryById, deleteMemoryById, getMemoryVersions, consumeApproval, escapeLike,
   retractMemory, saveAgentMemorySuperseding,
+  MEMORY_SELECT_COLS,
   type Memory, type MemoryRow, type Approval,
 } from '../../db.js'
 import { MAIN_AGENT_ID, ALLOWED_CHAT_ID, OLLAMA_URL, MEMORY_IMPORT_CATEGORIZE_MODEL, APP_TZ, MEMORY_CONTENT_FILTER_STRICT_COMMANDS } from '../../config.js'
@@ -564,7 +565,7 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
         const db2 = getDb()
         const pattern = `%${escapeLike(q)}%`
         const dt = tsRange ? ' AND created_at >= ? AND created_at <= ?' : ''
-        results = db2.prepare(`SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared')${searchCategory ? ' AND category = ?' : ''} AND retracted_at IS NULL${dt} AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') ORDER BY accessed_at DESC LIMIT ?`)
+        results = db2.prepare(`SELECT ${MEMORY_SELECT_COLS} FROM memories WHERE (agent_id = ? OR category = 'shared')${searchCategory ? ' AND category = ?' : ''} AND retracted_at IS NULL${dt} AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') ORDER BY accessed_at DESC LIMIT ?`)
           .all(agentId, ...(searchCategory ? [searchCategory] : []), ...(tsRange ? [tsRange.fromTs, tsRange.toTs] : []), pattern, pattern, limit) as Memory[]
       }
     } else if (q) {
@@ -583,7 +584,7 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
         // relaxed=false. A zero that looks like a real answer is the whole
         // cost of this bug, which is why the fix is the parity, not a new mode.
         const dt = tsRange ? ' AND created_at >= ? AND created_at <= ?' : ''
-        results = db2.prepare(`SELECT * FROM memories WHERE (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\')${searchCategory ? ' AND category = ?' : ''} AND retracted_at IS NULL${dt} ORDER BY accessed_at DESC LIMIT ?`)
+        results = db2.prepare(`SELECT ${MEMORY_SELECT_COLS} FROM memories WHERE (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\')${searchCategory ? ' AND category = ?' : ''} AND retracted_at IS NULL${dt} ORDER BY accessed_at DESC LIMIT ?`)
           .all(pattern, pattern, ...(searchCategory ? [searchCategory] : []), ...(tsRange ? [tsRange.fromTs, tsRange.toTs] : []), limit) as Memory[]
       }
     } else if (agentId) {

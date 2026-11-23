@@ -259,6 +259,11 @@ function readOnceFlag(taskName: string, raw: unknown): boolean {
 /** Test seam: the announce-once memory is process-wide by design. */
 export function resetOnceValueAnnouncements(): void {
   announcedNonBooleanOnce.clear()
+  scheduledTaskReadCache.clear()
+}
+
+export function clearScheduledTaskReadCache(): void {
+  scheduledTaskReadCache.clear()
 }
 
 function readBufferOr(path: string): Buffer | null {
@@ -380,12 +385,17 @@ export function scheduledTaskHashFromFiles(
   taskDir: string,
   skillBuf: Buffer | null,
   configBuf: Buffer | null,
+  opts?: { preCheck?: unknown; hasPreCheck?: boolean },
 ): { contentHash?: string; preCheckSha256?: string; dirFiles: number } {
   let preCheck: unknown
-  try {
-    const parsed = JSON.parse(configBuf != null ? configBuf.toString('utf-8') : '{}')
-    if (parsed && typeof parsed === 'object') preCheck = (parsed as { preCheck?: unknown }).preCheck
-  } catch { /* unparsable config: no preCheck */ }
+  if (opts?.hasPreCheck) {
+    preCheck = opts.preCheck
+  } else {
+    try {
+      const parsed = JSON.parse(configBuf != null ? configBuf.toString('utf-8') : '{}')
+      if (parsed && typeof parsed === 'object') preCheck = (parsed as { preCheck?: unknown }).preCheck
+    } catch { /* unparsable config: no preCheck */ }
+  }
   const target = preCheckHashTarget(taskDir, preCheck)
   const preCheckBuf = target ? readBufferOr(target) : null
   const preCheckSha256 = target ? preCheckBytesSha256(preCheckBuf) : undefined
@@ -414,8 +424,86 @@ export function scheduledTaskHashFromFiles(
   }
 }
 
+interface ScheduledTaskCacheEntry {
+  sig: string
+  preCheckTarget: string | null
+  task: ScheduledTask
+}
+const scheduledTaskReadCache = new Map<string, ScheduledTaskCacheEntry>()
+const SCHEDULED_TASK_CACHE_MAX = 256
+
+function statSig(path: string): string {
+  try {
+    const s = statSync(path)
+    return `${s.mtimeMs}:${s.ctimeMs}:${s.size}:${s.ino}`
+  } catch {
+    return 'missing'
+  }
+}
+
+function computeTaskDirMetaSig(dir: string, preCheckTarget: string | null): string | null {
+  const parts: string[] = [statSig(join(dir, 'SKILL.md')), statSig(join(dir, 'task-config.json'))]
+  if (parts[0] === 'missing' && parts[1] === 'missing') return null
+  if (preCheckTarget) parts.push(`pc:${preCheckTarget}:${statSig(preCheckTarget)}`)
+
+  let entryCount = 0
+  let bytes = 0
+  const seenDirs = new Set<string>()
+  const walk = (abs: string, rel: string): boolean => {
+    let real: string
+    try { real = realpathSync(abs) } catch { return true }
+    if (seenDirs.has(real)) { parts.push(`loop:${rel}`); return true }
+    seenDirs.add(real)
+    let names: string[]
+    try { names = readdirSync(abs).sort() } catch { parts.push(`unreadable:${rel}`); return true }
+    for (const name of names) {
+      const childRel = rel ? `${rel}/${name}` : name
+      if (!rel && (name === 'SKILL.md' || name === 'task-config.json')) continue
+      if (entryCount >= TASK_DIR_MAX_FILES) return false
+      entryCount++
+      const childAbs = join(abs, name)
+      let st: ReturnType<typeof statSync>
+      try {
+        st = statSync(childAbs)
+      } catch {
+        let link = ''
+        try { if (lstatSync(childAbs).isSymbolicLink()) link = readlinkSync(childAbs) } catch { /* gone */ }
+        parts.push(`b:${childRel}:${link}`)
+        continue
+      }
+      if (st.isDirectory()) {
+        parts.push(`d:${childRel}:${st.mtimeMs}:${st.ctimeMs}:${st.ino}`)
+        if (!walk(childAbs, childRel)) return false
+        continue
+      }
+      if (!st.isFile()) { parts.push(`s:${childRel}`); continue }
+      bytes += st.size
+      if (bytes > TASK_DIR_MAX_BYTES) return false
+      parts.push(`f:${childRel}:${st.mtimeMs}:${st.ctimeMs}:${st.size}:${st.ino}`)
+    }
+    return true
+  }
+  if (!walk(dir, '')) return null
+  return parts.join('|')
+}
+
+function cloneScheduledTask(task: ScheduledTask): ScheduledTask {
+  return {
+    ...task,
+    ...(task.requires?.mcp_servers ? { requires: { mcp_servers: [...task.requires.mcp_servers] } } : {}),
+  }
+}
+
 export function readScheduledTask(taskName: string): ScheduledTask | null {
   const dir = join(SCHEDULED_TASKS_DIR, taskName)
+  const cached = scheduledTaskReadCache.get(dir)
+  if (cached) {
+    const sig = computeTaskDirMetaSig(dir, cached.preCheckTarget)
+    if (sig !== null && sig === cached.sig) {
+      return cloneScheduledTask(cached.task)
+    }
+  }
+
   const skillPath = join(dir, 'SKILL.md')
   const configPath = join(dir, 'task-config.json')
   // Read each file ONCE as bytes: the same buffers feed both the parse and the
@@ -424,7 +512,10 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
   const configBuf = readBufferOr(configPath)
   // command-type tasks have no SKILL.md; they are defined entirely by
   // task-config.json. Only bail if neither file exists.
-  if (skillBuf == null && configBuf == null) return null
+  if (skillBuf == null && configBuf == null) {
+    scheduledTaskReadCache.delete(dir)
+    return null
+  }
 
   const skillContent = skillBuf != null ? skillBuf.toString('utf-8') : ''
   const { name, description, body } = parseSkillMdFrontmatter(skillContent)
@@ -435,9 +526,14 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
   } catch { /* use defaults */ }
   if (config === null || typeof config !== 'object') config = {}
 
-  const { contentHash, preCheckSha256, dirFiles } = scheduledTaskHashFromFiles(dir, skillBuf, configBuf)
+  const { contentHash, preCheckSha256, dirFiles } = scheduledTaskHashFromFiles(
+    dir,
+    skillBuf,
+    configBuf,
+    { preCheck: config.preCheck, hasPreCheck: true },
+  )
 
-  return {
+  const task: ScheduledTask = {
     name: name || taskName,
     description: description || config.description || '',
     prompt: body,
@@ -474,6 +570,22 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
     dirFiles,
     dirName: taskName,
   }
+
+  if (contentHash !== undefined) {
+    const preCheckTarget = preCheckHashTarget(dir, config.preCheck)
+    const sig = computeTaskDirMetaSig(dir, preCheckTarget)
+    if (sig !== null) {
+      if (!scheduledTaskReadCache.has(dir) && scheduledTaskReadCache.size >= SCHEDULED_TASK_CACHE_MAX) {
+        const oldest = scheduledTaskReadCache.keys().next().value
+        if (oldest !== undefined) scheduledTaskReadCache.delete(oldest)
+      }
+      scheduledTaskReadCache.set(dir, { sig, preCheckTarget, task })
+    }
+  } else {
+    scheduledTaskReadCache.delete(dir)
+  }
+
+  return cloneScheduledTask(task)
 }
 
 // Only a finite number is a policy; anything else (string, null, NaN) is
@@ -574,6 +686,7 @@ export function writeScheduledTask(
   if (!config.createdAt) config.createdAt = Math.floor(Date.now() / 1000)
   const configContent = JSON.stringify(config, null, 2)
   atomicWriteFileSync(configPath, configContent)
+  scheduledTaskReadCache.delete(dir)
   return { skill: skillContent, config: configContent }
 }
 
@@ -613,12 +726,14 @@ export function isOnceRunSuccess(
  * task-config.json is refused (readJsonObjectForWrite throws), never reset.
  */
 export function disableOnceTask(taskName: string, nowMs: number): boolean {
-  const configPath = join(SCHEDULED_TASKS_DIR, taskName, 'task-config.json')
+  const dir = join(SCHEDULED_TASKS_DIR, taskName)
+  const configPath = join(dir, 'task-config.json')
   if (!existsSync(configPath)) return false
   const config = readJsonObjectForWrite(configPath)
   if (config.once !== true || config.enabled === false) return false
   config.enabled = false
   config.onceDisabledAt = new Date(nowMs).toISOString()
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  scheduledTaskReadCache.delete(dir)
   return true
 }

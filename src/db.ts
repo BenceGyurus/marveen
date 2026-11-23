@@ -140,9 +140,18 @@ function ensureKanbanClaimSchemaStep(d: Database.Database): boolean {
 // vec: the stored text parsed to an array of plain numbers (the normal case).
 // Otherwise vec is null and `parsed` holds whatever JSON.parse returned, or `failed`
 // says it threw; such a row is scored by the old code verbatim (see vectorSearch).
-type CachedEmbedding = { len: number; vec: Float64Array | null; parsed: unknown; failed: boolean; normSq: number }
+type CachedEmbedding = { len: number; vec: Float64Array | null; parsed: unknown; failed: boolean; normSq: number; norm: number }
 const embeddingCache = new Map<number, CachedEmbedding>()
 const EMBEDDING_CACHE_MAX = 200_000
+
+/**
+ * Memory columns excluding the ~16 KB JSON embedding text (replaced with NULL)
+ * so list/search/recall queries avoid reading overflow pages when vectors are unused.
+ */
+export const MEMORY_SELECT_COLS =
+  'id, chat_id, topic_key, content, sector, salience, created_at, accessed_at, agent_id, category, auto_generated, keywords, NULL AS embedding, embedding_model, updated_at, updated_by, retracted_at, supersedes'
+const MEMORY_SELECT_COLS_M =
+  'm.id, m.chat_id, m.topic_key, m.content, m.sector, m.salience, m.created_at, m.accessed_at, m.agent_id, m.category, m.auto_generated, m.keywords, NULL AS embedding, m.embedding_model, m.updated_at, m.updated_by, m.retracted_at, m.supersedes'
 // What the embedding_model column records: the model, plus the truncation
 // when EMBED_DIMS is set, so a change of either one marks old vectors as
 // another model's (excluded from search, re-embedded by the backfill).
@@ -191,6 +200,8 @@ export function initDatabase(dbPathOverride?: string): void {
     }
   }
   db = new Database(dbPath)
+  // SQLite lower() only folds ASCII. Recall also searches Hungarian content and keywords.
+  db.function('recall_lower', { deterministic: true }, (text: string) => text.toLowerCase())
   openedDbPath = isMemory ? null : dbPath
   db.pragma('journal_mode = WAL')
   // Performance pragmas: safe with WAL, applied after journal_mode is set.
@@ -200,6 +211,8 @@ export function initDatabase(dbPathOverride?: string): void {
   db.pragma('cache_size = -65536')
   if (!isMemory) db.pragma('mmap_size = 268435456')
   db.pragma('synchronous = NORMAL')
+  db.pragma('busy_timeout = 5000')
+  db.pragma('temp_store = MEMORY')
   if (!isMemory) tightenDbPermissions(dbPath)
 
   db.exec(`
@@ -435,6 +448,8 @@ export function initDatabase(dbPathOverride?: string): void {
   // = 'shared'`). SQLite can serve an OR from indexes only when BOTH sides have
   // one, so without this the dated listing is a full scan.
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_category_created ON memories(category, created_at)`)
+  // Agent-agnostic created_at queries (overview recent activity, un-scoped date-range recall).
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)`)
 
   // --- Conversation-continuity ledger (deterministic; P0 2026-06-02) ---
   // A durable ROLLING TRANSCRIPT of every channel turn -- inbound user messages
@@ -570,6 +585,7 @@ export function initDatabase(dbPathOverride?: string): void {
       db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories(agent_id, category)`)
       db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_agent_created ON memories(agent_id, created_at)`)
       db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_category_created ON memories(category, created_at)`)
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)`)
     }
   } catch (err) {
     // Previously this silently swallowed every error which masked the
@@ -755,6 +771,7 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_daily_logs_date ON daily_logs(agent_id, date)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_daily_logs_only_date ON daily_logs(date, created_at)`)
 
   // Link between a daily-log row and the searchable memories row that mirrors
   // it (card f90928e3). UNIQUE on both sides: one log row has at most one
@@ -1168,6 +1185,7 @@ export function initDatabase(dbPathOverride?: string): void {
   // the ORDER BY (measured upstream: ~15-18 ms at 33k rows); with it, an index
   // lookup read newest-first.
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_messages_delivered ON agent_messages(to_agent, delivered_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_messages_created ON agent_messages(created_at)`)
   // Card 06f062e4: the bus has no sender authentication -- from_agent is
   // self-declared and every sub-agent spawned under a parent shares that
   // parent's from_agent string, invisibly to the parent session and its
@@ -2350,7 +2368,7 @@ export function searchMemories(
     const dt = tsClause('m.created_at', range)
     const { rows, relaxed } = ftsWithOrFallback(query, (terms) =>
       db.prepare(
-        `SELECT m.*, f.rank AS rank FROM memories m
+        `SELECT ${MEMORY_SELECT_COLS_M}, f.rank AS rank FROM memories m
          JOIN memories_fts f ON m.id = f.rowid
          WHERE f.memories_fts MATCH ? AND m.chat_id = ?${category ? ' AND m.category = ?' : ''} AND m.retracted_at IS NULL${dt.sql}
          ORDER BY rank
@@ -2366,7 +2384,7 @@ export function searchMemories(
 
 export function recentMemories(chatId: string, limit = 5): Memory[] {
   return db
-    .prepare('SELECT * FROM memories WHERE chat_id = ? AND retracted_at IS NULL ORDER BY accessed_at DESC LIMIT ?')
+    .prepare(`SELECT ${MEMORY_SELECT_COLS} FROM memories WHERE chat_id = ? AND retracted_at IS NULL ORDER BY accessed_at DESC LIMIT ?`)
     .all(chatId, limit) as Memory[]
 }
 
@@ -2470,7 +2488,7 @@ export function getMemoriesForChat(chatId: string, limit = 10, offset = 0, categ
   const dt = tsClause('created_at', range)
   const stale = staleBefore !== undefined ? ' AND COALESCE(updated_at, created_at) < ?' : ''
   return db
-    .prepare(`SELECT * FROM memories WHERE chat_id = ?${category ? ' AND category = ?' : ''} AND retracted_at IS NULL${dt.sql}${stale} ORDER BY accessed_at DESC, id DESC LIMIT ? OFFSET ?`)
+    .prepare(`SELECT ${MEMORY_SELECT_COLS} FROM memories WHERE chat_id = ?${category ? ' AND category = ?' : ''} AND retracted_at IS NULL${dt.sql}${stale} ORDER BY accessed_at DESC, id DESC LIMIT ? OFFSET ?`)
     .all(chatId, ...(category ? [category] : []), ...dt.params, ...(staleBefore !== undefined ? [staleBefore] : []), limit, offset) as Memory[]
 }
 
@@ -2593,7 +2611,7 @@ export function getAgentMemories(agentId: string, limit: number = 20, category?:
   const dt = tsClause('created_at', range)
   const stale = staleBefore !== undefined ? ' AND COALESCE(updated_at, created_at) < ?' : ''
   const result = db.prepare(
-    `SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared')${category ? ' AND category = ?' : ''} AND retracted_at IS NULL${dt.sql}${stale} ORDER BY accessed_at DESC, id DESC LIMIT ? OFFSET ?`
+    `SELECT ${MEMORY_SELECT_COLS} FROM memories WHERE (agent_id = ? OR category = 'shared')${category ? ' AND category = ?' : ''} AND retracted_at IS NULL${dt.sql}${stale} ORDER BY accessed_at DESC, id DESC LIMIT ? OFFSET ?`
   ).all(agentId, ...(category ? [category] : []), ...dt.params, ...(staleBefore !== undefined ? [staleBefore] : []), limit, offset) as Memory[]
   memoryCacheSet(key, result)
   return result
@@ -2625,7 +2643,7 @@ export function searchAgentMemories(
   try {
     const { rows, relaxed } = ftsWithOrFallback(query, (terms) =>
       db.prepare(
-        `SELECT m.*, f.rank AS rank FROM memories m
+        `SELECT ${MEMORY_SELECT_COLS_M}, f.rank AS rank FROM memories m
          JOIN memories_fts f ON m.id = f.rowid
          WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared')${category ? ' AND m.category = ?' : ''} AND m.retracted_at IS NULL${dt.sql}
          ORDER BY rank LIMIT ?`
@@ -2637,7 +2655,7 @@ export function searchAgentMemories(
     const pattern = `%${escapeLike(query)}%`
     const ld = tsClause('created_at', range)
     return db.prepare(
-      `SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared')${category ? ' AND category = ?' : ''} AND retracted_at IS NULL${ld.sql} AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') ORDER BY accessed_at DESC LIMIT ?`
+      `SELECT ${MEMORY_SELECT_COLS} FROM memories WHERE (agent_id = ? OR category = 'shared')${category ? ' AND category = ?' : ''} AND retracted_at IS NULL${ld.sql} AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') ORDER BY accessed_at DESC LIMIT ?`
     ).all(agentId, ...(category ? [category] : []), ...ld.params, pattern, pattern, limit) as Memory[]
   }
 }
@@ -3088,22 +3106,36 @@ export function escapeLike(s: string): string {
 const NOT_MIRROR = 'NOT EXISTS (SELECT 1 FROM daily_log_memory dlm WHERE dlm.memory_id = id)'
 const NOT_MIRROR_M = 'NOT EXISTS (SELECT 1 FROM daily_log_memory dlm WHERE dlm.memory_id = m.id)'
 
-export function recallByDateRange(from: string, to: string, agentId?: string): RecallResult {
-  const logSql = agentId
-    ? 'SELECT id, agent_id, date, content, created_at FROM daily_logs WHERE date >= ? AND date <= ? AND agent_id = ? ORDER BY date ASC, created_at ASC'
-    : 'SELECT id, agent_id, date, content, created_at FROM daily_logs WHERE date >= ? AND date <= ? ORDER BY date ASC, created_at ASC'
-  const logParams = agentId ? [from, to, agentId] : [from, to]
-  const logs = db.prepare(logSql).all(...logParams) as RecallResult['logs']
+export function recallByDateRange(
+  from: string, to: string, agentId?: string,
+  { query = '', limit }: { query?: string; limit?: number } = {},
+): RecallResult & { hasMore?: { logs: boolean; memories: boolean } } {
+  const search = query.toLowerCase()
+  const limitClause = limit === undefined ? '' : ' LIMIT ?'
+  const limitParams = limit === undefined ? [] : [limit + 1]
+  const agentParams = agentId ? [agentId] : []
+  const logSql = `SELECT id, agent_id, date, content, created_at FROM daily_logs
+    WHERE date BETWEEN ? AND ? ${agentId ? 'AND agent_id = ?' : ''}
+    ${query ? 'AND instr(recall_lower(content), ?) > 0' : ''}
+    ORDER BY date, created_at, id${limitClause}`
+  const logs = db.prepare(logSql).all(from, to, ...agentParams, ...(query ? [search] : []), ...limitParams) as RecallResult['logs']
 
-  const fromTs = toBudapestTs(from, false)
-  const toTs = toBudapestTs(to, true)
-  const memSql = agentId
-    ? `SELECT * FROM memories WHERE created_at >= ? AND created_at <= ? AND (agent_id = ? OR category = 'shared') AND retracted_at IS NULL AND ${NOT_MIRROR} ORDER BY created_at ASC`
-    : `SELECT * FROM memories WHERE created_at >= ? AND created_at <= ? AND retracted_at IS NULL AND ${NOT_MIRROR} ORDER BY created_at ASC`
-  const memParams = agentId ? [fromTs, toTs, agentId] : [fromTs, toTs]
-  const memories = db.prepare(memSql).all(...memParams) as Memory[]
+  const memSql = `SELECT ${MEMORY_SELECT_COLS} FROM memories WHERE created_at BETWEEN ? AND ?
+    ${agentId ? "AND (agent_id = ? OR category = 'shared')" : ''}
+    AND retracted_at IS NULL AND ${NOT_MIRROR}
+    ${query ? "AND (instr(recall_lower(content), ?) > 0 OR instr(recall_lower(coalesce(keywords, '')), ?) > 0)" : ''}
+    ORDER BY created_at, id${limitClause}`
+  const memories = db.prepare(memSql).all(
+    toBudapestTs(from, false), toBudapestTs(to, true), ...agentParams,
+    ...(query ? [search, search] : []), ...limitParams,
+  ) as Memory[]
 
-  return { logs, memories, dateRange: { from, to } }
+  const dateRange = { from, to }
+  if (limit === undefined) return { logs, memories, dateRange }
+  return {
+    logs: logs.slice(0, limit), memories: memories.slice(0, limit), dateRange,
+    hasMore: { logs: logs.length > limit, memories: memories.length > limit },
+  }
 }
 
 export function recallSearch(query: string, agentId?: string, limit = 50): RecallResult {
@@ -3115,8 +3147,8 @@ export function recallSearch(query: string, agentId?: string, limit = 50): Recal
       // same λ-blend as the other search paths, so a strongly matching older
       // memory can still surface above barely-matching fresh noise.
       const sql = agentId
-        ? `SELECT m.*, f.rank AS rank FROM memories m JOIN memories_fts f ON m.id = f.rowid WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared') AND m.retracted_at IS NULL AND ${NOT_MIRROR_M} ORDER BY rank LIMIT ?`
-        : `SELECT m.*, f.rank AS rank FROM memories m JOIN memories_fts f ON m.id = f.rowid WHERE f.memories_fts MATCH ? AND m.retracted_at IS NULL AND ${NOT_MIRROR_M} ORDER BY rank LIMIT ?`
+        ? `SELECT ${MEMORY_SELECT_COLS_M}, f.rank AS rank FROM memories m JOIN memories_fts f ON m.id = f.rowid WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared') AND m.retracted_at IS NULL AND ${NOT_MIRROR_M} ORDER BY rank LIMIT ?`
+        : `SELECT ${MEMORY_SELECT_COLS_M}, f.rank AS rank FROM memories m JOIN memories_fts f ON m.id = f.rowid WHERE f.memories_fts MATCH ? AND m.retracted_at IS NULL AND ${NOT_MIRROR_M} ORDER BY rank LIMIT ?`
       const { rows } = ftsWithOrFallback(query, (terms) =>
         agentId
           ? db.prepare(sql).all(terms, agentId, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
@@ -3125,8 +3157,8 @@ export function recallSearch(query: string, agentId?: string, limit = 50): Recal
       memories = withoutRank(reRankByRecency(rows, limit)) as Memory[]
     } catch {
       const sql = agentId
-        ? `SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND retracted_at IS NULL AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') AND ${NOT_MIRROR} ORDER BY created_at DESC LIMIT ?`
-        : `SELECT * FROM memories WHERE retracted_at IS NULL AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') AND ${NOT_MIRROR} ORDER BY created_at DESC LIMIT ?`
+        ? `SELECT ${MEMORY_SELECT_COLS} FROM memories WHERE (agent_id = ? OR category = 'shared') AND retracted_at IS NULL AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') AND ${NOT_MIRROR} ORDER BY created_at DESC LIMIT ?`
+        : `SELECT ${MEMORY_SELECT_COLS} FROM memories WHERE retracted_at IS NULL AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') AND ${NOT_MIRROR} ORDER BY created_at DESC LIMIT ?`
       const pat = `%${escaped}%`
       memories = agentId
         ? db.prepare(sql).all(agentId, pat, pat, limit) as Memory[]
@@ -6588,7 +6620,7 @@ function vectorSearch(
         for (let i = 0; i < vec.length; i++) normSq += vec[i] * vec[i]
         parsed = undefined
       }
-      entry = { len: r.elen, vec, parsed, failed, normSq }
+      entry = { len: r.elen, vec, parsed, failed, normSq, norm: Math.sqrt(normSq) }
       // The bound holds at every insert, not only between calls.
       if (embeddingCache.size >= EMBEDDING_CACHE_MAX) embeddingCache.clear()
       embeddingCache.set(c.id, entry)
@@ -6605,34 +6637,48 @@ function vectorSearch(
   // bit for bit: each sum is accumulated in index order, as there.
   let normQ = 0
   for (let i = 0; i < queryEmbedding.length; i++) normQ += queryEmbedding[i] * queryEmbedding[i]
-  const scored = live.flatMap(({ id, entry }): { id: number; similarity: number }[] => {
+  const sqrtNormQ = Math.sqrt(normQ)
+  const scored: { id: number; similarity: number }[] = []
+  const similarities: number[] = []
+  for (let k = 0; k < live.length; k++) {
+    const { id, entry } = live[k]
     if (entry.vec === null) {
       // Anything but an array of numbers (never written by this code): the old
       // per-row code verbatim, so its result, including a throw scored 0, is unchanged.
-      if (entry.failed) return [{ id, similarity: 0 }]
+      if (entry.failed) {
+        scored.push({ id, similarity: 0 })
+        similarities.push(0)
+        continue
+      }
       try {
         const emb = entry.parsed as number[]
-        if (emb.length !== queryEmbedding.length) return []
-        return [{ id, similarity: cosineSimilarity(queryEmbedding, emb) }]
+        if (emb.length !== queryEmbedding.length) continue
+        const sim = cosineSimilarity(queryEmbedding, emb)
+        scored.push({ id, similarity: sim })
+        similarities.push(sim)
       } catch {
-        return [{ id, similarity: 0 }]
+        scored.push({ id, similarity: 0 })
+        similarities.push(0)
       }
+      continue
     }
-    if (entry.vec.length !== queryEmbedding.length) return []
+    if (entry.vec.length !== queryEmbedding.length) continue
     let dot = 0
     for (let i = 0; i < queryEmbedding.length; i++) dot += queryEmbedding[i] * entry.vec[i]
-    return [{ id, similarity: dot / (Math.sqrt(normQ) * Math.sqrt(entry.normSq)) }]
-  })
+    const sim = dot / (sqrtNormQ * entry.norm)
+    scored.push({ id, similarity: sim })
+    similarities.push(sim)
+  }
 
   // The floor comes from EVERY scored row, before the cut to `limit`: the
   // plateau is a property of the corpus, not of the top of the list.
-  const floor = vectorSimilarityFloor(scored.map(s => s.similarity))
+  const floor = vectorSimilarityFloor(similarities)
   scored.sort((a, b) => b.similarity - a.similarity)
   const top = scored.slice(0, limit)
   if (top.length === 0) return { hits: [], floor }
   // Full rows only for the hits, one primary-key read each (no parameter list that
   // grows with `limit`); a row deleted between the two reads is skipped.
-  const getRow = db.prepare('SELECT * FROM memories WHERE id = ?')
+  const getRow = db.prepare(`SELECT ${MEMORY_SELECT_COLS} FROM memories WHERE id = ?`)
   const hits: VectorHit[] = []
   for (const t of top) {
     const memory = getRow.get(t.id) as Memory | undefined
