@@ -123,6 +123,27 @@ export function isFederationWireEndpoint(path: string, method: string): boolean 
 // Public (ungated) surfaces. These mirror the old inline exceptions exactly,
 // plus the new POST /api/auth/login (public + throttled) so the login form can
 // reach the server before a session exists.
+/** Public static asset paths that need no auth lookup (avoiding SQLite/session checks). */
+export function isPublicStaticPath(path: string, method: string): boolean {
+  if (method !== 'GET' && method !== 'HEAD') return false
+  return (
+    path === '/' ||
+    path === '/index.html' ||
+    path === '/style.css' ||
+    path === '/app.js' ||
+    path === '/manifest.json' ||
+    path === '/sw.js' ||
+    path === '/operator' ||
+    path === '/operator.html' ||
+    path === '/operator.js' ||
+    path === '/video-review' ||
+    path === '/video-review.js' ||
+    path.startsWith('/lang/') ||
+    path.startsWith('/avatars/') ||
+    path.startsWith('/icons/')
+  )
+}
+
 export function requiresAuth(path: string, method: string): boolean {
   if (path === '/api/auth/status' && method === 'GET') return false
   if (path === '/api/auth/login' && method === 'POST') return false
@@ -195,8 +216,9 @@ export function resolveAuth(
     if (peer !== null) return { kind: 'federation', peer }
   }
 
-  // 5. Browser-login session cookie.
-  const cookieValue = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME]
+  // 5. Browser-login session cookie + 6. Operator browser session (parsed once).
+  const cookies = parseCookies(req.headers.cookie)
+  const cookieValue = cookies[SESSION_COOKIE_NAME]
   if (cookieValue) {
     const session = resolveSession(cookieValue)
     if (session) return { kind: 'session', user: session.username }
@@ -205,7 +227,7 @@ export function resolveAuth(
   // 6. Operator browser session (DASHOPERATOR1005). Resolves to the operator
   //    key it was minted from, so the operator gate fences it exactly like the
   //    key itself; last, so an owner session in the same browser always wins.
-  const operatorCookie = parseCookies(req.headers.cookie)[OPERATOR_COOKIE_NAME]
+  const operatorCookie = cookies[OPERATOR_COOKIE_NAME]
   if (operatorCookie) {
     const op = resolveOperatorSession(operatorCookie)
     if (op) return { kind: 'device', device: op.device, deviceId: op.deviceId, scope: 'operator' }
@@ -595,6 +617,7 @@ export async function gateRequest(
   method: string,
   opts: { dashboardToken: string; resolveAgentToken?: AgentTokenResolver; mainAgentId: string; identityLookups?: IdentityLookups; agentVaultAcl?: () => VaultAcl },
 ): Promise<AuthResult | null> {
+  if (isPublicStaticPath(path, method)) return { kind: 'none' }
   const auth = resolveAuth(req, url, path, method, opts.dashboardToken, opts.resolveAgentToken)
   if (requiresAuth(path, method) && auth.kind === 'none') {
     if (isFederationWireEndpoint(path, method)) {

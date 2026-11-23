@@ -19,6 +19,8 @@ import {
   agentSessionName,
   restartAgentProcess,
   capturePane,
+  withTmuxBatch,
+  prefetchPaneCaptures,
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { paneLooksIdle } from '../pane-state.js'
@@ -161,13 +163,22 @@ async function restartFor(name: string): Promise<void> {
   }
 }
 
-async function checkAgent(name: string, nowMs: number, revertAfterMs: number, chain: string[]): Promise<void> {
+async function checkAgent(
+  name: string,
+  nowMs: number,
+  revertAfterMs: number,
+  chain: string[],
+  prefetched?: { running?: boolean; hasPane?: boolean; pane?: string | null },
+): Promise<void> {
   // Sub-agents must be up; the main session is launchd-managed (always present).
-  if (name !== MAIN_AGENT_ID && agentRunState(name) !== 'running') return
+  const isUp = name === MAIN_AGENT_ID
+    ? true
+    : (prefetched?.running ?? (agentRunState(name) === 'running'))
+  if (!isUp) return
 
   const session = sessionFor(name)
   const host = name === MAIN_AGENT_ID ? null : readAgentRemoteHost(name)
-  const pane = capturePane(session, host)
+  const pane = prefetched?.hasPane ? prefetched.pane : capturePane(session, host)
   if (pane == null) return
 
   const limitDetected = detectsUsageLimit(pane)
@@ -224,11 +235,32 @@ export function startModelFallbackRunner(): NodeJS.Timeout {
       }
       const now = Date.now()
       const revertAfterMs = cfg.revertAfterMinutes * 60_000
-      try { await checkAgent(MAIN_AGENT_ID, now, revertAfterMs, cfg.chain) }
+      const subNames = listAgentNames()
+      const preloaded = withTmuxBatch(() => {
+        const running = new Set(subNames.filter(n => agentRunState(n) === 'running'))
+        const localTargets: Array<[string, string]> = [[MAIN_AGENT_ID, MAIN_CHANNELS_SESSION]]
+        for (const n of subNames) {
+          if (running.has(n) && readAgentRemoteHost(n) == null) {
+            localTargets.push([n, agentSessionName(n)])
+          }
+        }
+        prefetchPaneCaptures(localTargets.map(([, s]) => s))
+        const panes = new Map<string, string | null>()
+        for (const [n, s] of localTargets) {
+          panes.set(n, capturePane(s, null))
+        }
+        return { running, panes }
+      })
+      try { await checkAgent(MAIN_AGENT_ID, now, revertAfterMs, cfg.chain, { hasPane: preloaded.panes.has(MAIN_AGENT_ID), pane: preloaded.panes.get(MAIN_AGENT_ID) }) }
       catch (err) { logger.debug({ err }, 'model-fallback: main check error') }
-      for (const name of listAgentNames()) {
-        try { await checkAgent(name, now, revertAfterMs, cfg.chain) }
-        catch (err) { logger.debug({ err, agent: name }, 'model-fallback: agent check error') }
+      for (const name of subNames) {
+        try {
+          await checkAgent(name, now, revertAfterMs, cfg.chain, {
+            running: preloaded.running.has(name),
+            hasPane: preloaded.panes.has(name),
+            pane: preloaded.panes.get(name),
+          })
+        } catch (err) { logger.debug({ err, agent: name }, 'model-fallback: agent check error') }
       }
     } finally {
       tickRunning = false

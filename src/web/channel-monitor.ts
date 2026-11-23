@@ -2466,7 +2466,7 @@ function refreshKeepaliveFromInbound(): void {
   }
 }
 
-function checkMainKeepaliveStaleness(): void {
+function checkMainKeepaliveStaleness(knownLive?: { claudePid: number; providerType: ChannelProviderType }): void {
   if (mainOrchestratorCliType() !== 'claude') return
   // SAFETY NET first: let any fresh inbound traffic warm the file before we
   // judge staleness, so a busy-but-alive session is never seen as stale-deaf.
@@ -2495,10 +2495,11 @@ function checkMainKeepaliveStaleness(): void {
   // already uses; reuse it here so the two paths agree on "alive".
   let pollerAlive = false
   try {
-    const claudePid = getClaudePidForSession(MAIN_CHANNELS_SESSION)
+    const claudePid = knownLive?.claudePid ?? getClaudePidForSession(MAIN_CHANNELS_SESSION)
     if (claudePid != null) {
-      const provider = getProvider(getMainAgentProvider())
-      if (hasChannelPluginAlive(claudePid, provider.type)) {
+      const providerType = knownLive?.providerType ?? getProvider(getMainAgentProvider()).type
+      const alive = knownLive ? true : hasChannelPluginAlive(claudePid, providerType)
+      if (alive) {
         pollerAlive = true
         // A live poller is trusted only while the keepalive is freshly stale.
         // Past KEEPALIVE_LIVENESS_TRUST_CEILING_MS a live-but-non-delivering
@@ -2507,10 +2508,10 @@ function checkMainKeepaliveStaleness(): void {
         let livenessAgeMs: number | null = null
         try { livenessAgeMs = Date.now() - statSync(KEEPALIVE_FILE).mtimeMs } catch { livenessAgeMs = null }
         if (shouldTrustLivePollerOverStaleness({ keepaliveAgeMs: livenessAgeMs, trustCeilingMs: KEEPALIVE_LIVENESS_TRUST_CEILING_MS })) {
-          logger.debug({ claudePid, provider: provider.type, livenessAgeMs }, 'Keepalive stale but channel plugin is alive and within trust ceiling -- skipping respawn')
+          logger.debug({ claudePid, provider: providerType, livenessAgeMs }, 'Keepalive stale but channel plugin is alive and within trust ceiling -- skipping respawn')
           return
         }
-        logger.warn({ claudePid, provider: provider.type, livenessAgeMs }, 'Keepalive stale beyond liveness-trust ceiling despite a live poller -- treating as possible deafness, not skipping')
+        logger.warn({ claudePid, provider: providerType, livenessAgeMs }, 'Keepalive stale beyond liveness-trust ceiling despite a live poller -- treating as possible deafness, not skipping')
       }
     }
   } catch (err) {
@@ -3236,7 +3237,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           }
           // Process-alive does NOT prove the inbound MCP pipe is healthy (the
           // deafness blind spot). Cross-check the keep-alive freshness.
-          checkMainKeepaliveStaleness()
+          checkMainKeepaliveStaleness({ claudePid, providerType: t.provider })
           // BOOTSTAGGER1007 (b): the primary is alive -- now the co-listen ones.
           await checkMainColistenChannels(claudePid)
         } else {

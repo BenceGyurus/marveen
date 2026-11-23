@@ -1,15 +1,4 @@
-/**
- * GET /api/recall with q=: the query is a literal substring on every branch.
- *
- * With date= AND q= the route filters the date window in JS. It used to run the
- * query through the LIKE escaper first and then compare with String.includes(),
- * so `22%` became `22\%` and `snake_case` became `snake\_case`: a query holding
- * `%` or `_` never matched the memory or log that contains it, while a plain
- * word did. The escaper belongs to `LIKE ? ESCAPE '\'` only.
- *
- * The JS filter also folds case on both sides (query, content, keywords): an
- * upper-case query finds a lower-case row and the other way round.
- */
+/** Recall matches literal substrings and folds case, including accented letters. */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Readable } from 'node:stream'
 
@@ -144,5 +133,46 @@ describe('/api/recall q= without date=: the SQL LIKE path is already literal', (
     expect(us.body.logs.map((l: any) => l.content)).toEqual(['## 11:00 -- moved my_setting into config'])
     const wild = await recall(`/api/recall?agent=agent-a&q=${q('o_t')}`)
     expect(wild.body.logs).toEqual([])
+  })
+})
+
+it.each(['/api/recall?q=control', '/api/recall/dates?agent=agent-a'])(
+  '%s rejects malformed and negative limits', async path => {
+    for (const limit of ['abc', '-1', '2.5']) {
+      expect((await recall(path + '&limit=' + limit)).status).toBe(400)
+    }
+  },
+)
+
+describe('bounded memory recall tasks', () => {
+  it.each([
+    ['Keresd meg a szállítási döntést', 'SZÁLLÍTÁS', 'Szállítás pénteken'],
+    ['Find the shipping decision', 'shipping', 'Shipping on Friday'],
+  ])('%s', async (_task, query, decision) => {
+    insertMemory(decision + ' (private)')
+    getDb().prepare("UPDATE memories SET agent_id = 'agent-b' WHERE content = ?").run(decision + ' (private)')
+    for (let i = 0; i < 99; i++) insertMemory('Unrelated note ' + i)
+    insertMemory(decision)
+    const path = '/api/recall?' + new URLSearchParams({ agent: 'agent-a', date: DAY_ISO, q: query, limit: '1' })
+    const { body } = await recall(path)
+    expect(body.memories.map((m: any) => m.content)).toEqual([decision])
+    expect(body.hasMore).toEqual({ logs: false, memories: false })
+  })
+
+  it('counts shared memories as visible when reporting remaining matches', async () => {
+    insertMemory('shared tomatoes')
+    getDb().prepare("UPDATE memories SET agent_id = 'agent-b', category = 'shared' WHERE content = ?").run('shared tomatoes')
+    const { body } = await recall(`/api/recall?agent=agent-a&date=${DAY_ISO}&q=tomatoes&limit=1`)
+    expect(body.hasMore).toEqual({ logs: false, memories: true })
+    expect(body.memories.map((m: any) => m.content)).toEqual(['plain control memory about tomatoes'])
+  })
+
+  it('limits logs and memories separately and reports overflow, including at limit zero', async () => {
+    for (const limit of [0, 1]) {
+      const { body } = await recall(`/api/recall?agent=agent-a&date=${DAY_ISO}&limit=${limit}`)
+      expect(body.logs).toHaveLength(limit)
+      expect(body.memories).toHaveLength(limit)
+      expect(body.hasMore).toEqual({ logs: true, memories: true })
+    }
   })
 })

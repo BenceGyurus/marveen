@@ -2,29 +2,20 @@ import { APP_TZ } from './config.js'
 
 const TZ = APP_TZ  // install zone (config.APP_TZ); was hardcoded Europe/Budapest
 
-function todayBudapest(nowSec?: number): string {
-  const d = nowSec === undefined ? new Date() : new Date(nowSec * 1000)
-  return new Intl.DateTimeFormat('sv-SE', { timeZone: TZ }).format(d)
-}
-
-function budapestDate(d: Date): string {
-  return new Intl.DateTimeFormat('sv-SE', { timeZone: TZ }).format(d)
-}
+const calendar = new Intl.DateTimeFormat('sv-SE', { timeZone: TZ })
 
 function addDays(dateStr: string, days: number): string {
-  const ms = new Date(`${dateStr}T12:00:00Z`).getTime() + days * 86_400_000
-  return budapestDate(new Date(ms))
+  const date = new Date(dateStr + 'T00:00:00Z')
+  date.setUTCDate(date.getUTCDate() + days)
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : ''
 }
 
-function dayOfWeekBudapest(dateStr: string): number {
-  const d = new Date(`${dateStr}T12:00:00Z`)
-  const weekday = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' }).format(d)
-  const map: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }
-  return map[weekday] ?? 0
+function dayOfWeek(dateStr: string): number {
+  return new Date(dateStr + 'T00:00:00Z').getUTCDay()
 }
 
 function startOfWeek(dateStr: string): string {
-  const dow = dayOfWeekBudapest(dateStr)
+  const dow = dayOfWeek(dateStr)
   const diff = dow === 0 ? -6 : 1 - dow
   return addDays(dateStr, diff)
 }
@@ -36,7 +27,7 @@ function startOfMonth(dateStr: string): string {
 function endOfMonth(dateStr: string): string {
   const [y, m] = dateStr.split('-').map(Number)
   const last = new Date(Date.UTC(y, m, 0))
-  return budapestDate(last)
+  return last.toISOString().slice(0, 10)
 }
 
 const HU_MONTHS: Record<string, string> = {
@@ -63,7 +54,7 @@ function stripAccents(s: string): string {
 }
 
 function lastOccurrence(targetDow: number, today: string): string {
-  const todayDow = dayOfWeekBudapest(today)
+  const todayDow = dayOfWeek(today)
   let diff = todayDow - targetDow
   if (diff <= 0) diff += 7
   return addDays(today, -diff)
@@ -75,9 +66,15 @@ function lastOccurrence(targetDow: number, today: string): string {
  * `nowSec` pins "now" for deterministic tests; production callers omit it.
  */
 export function parseDateExpr(input: string, nowSec?: number): DateRange | null {
+  const range = parseCalendarExpr(input, nowSec)
+  if (!range || !isRealDay(range.from) || !isRealDay(range.to) || range.from > range.to) return null
+  return range
+}
+
+function parseCalendarExpr(input: string, nowSec?: number): DateRange | null {
   const raw = input.trim()
   const s = stripAccents(raw.toLowerCase())
-  const today = todayBudapest(nowSec)
+  const today = calendar.format(nowSec === undefined ? Date.now() : nowSec * 1000)
 
   if (/^(\d{4})-(\d{2})-(\d{2})$/.test(raw)) {
     return { from: raw, to: raw }
@@ -181,19 +178,18 @@ export function parseDateExpr(input: string, nowSec?: number): DateRange | null 
 
 /** Unix seconds of the first/last second of a YYYY-MM-DD day in the install zone. */
 export function toBudapestTs(dateStr: string, endOfDay: boolean): number {
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: APP_TZ,
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  })
-  const refDate = new Date(`${dateStr}T${endOfDay ? '23:59:59' : '00:00:00'}`)
-  const parts = fmt.formatToParts(refDate)
-  const get = (t: string) => parts.find(p => p.type === t)?.value || '0'
-  const localStr = `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}:${get('second')}`
-  const localMs = new Date(localStr + 'Z').getTime()
-  const offsetMs = localMs - refDate.getTime()
-  const target = new Date(`${dateStr}T${endOfDay ? '23:59:59' : '00:00:00'}Z`)
-  return Math.floor((target.getTime() - offsetMs) / 1000)
+  const midnight = Date.parse(dateStr + 'T00:00:00Z') / 1000
+  let low = midnight - 86400
+  let high = midnight + 2 * 86400
+  const targetDay = dateStr.padStart(12, '0')
+  // Find the first second inside the day, or the first second after it.
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2)
+    const localDay = calendar.format(mid * 1000).padStart(12, '0')
+    if (localDay < targetDay || (endOfDay && localDay === targetDay)) low = mid + 1
+    else high = mid
+  }
+  return endOfDay ? low - 1 : low
 }
 
 export interface TsRange { fromTs: number; toTs: number }

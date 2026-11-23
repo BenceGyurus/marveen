@@ -1,8 +1,29 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join, basename } from 'node:path'
-import { serveFile, MIME } from '../http-helpers.js'
+import { compressBuffer, etagMatches, pickEncoding, serveFile, MIME } from '../http-helpers.js'
 import { PROJECT_ROOT, BRAND_NAME } from '../../config.js'
 import type { RouteContext } from './types.js'
+
+const PROD_WEB_DIR = join(PROJECT_ROOT, 'web')
+const PROD_DIST_WEB_DIR = join(PROJECT_ROOT, 'dist', 'web-assets')
+
+/**
+ * Resolve a static web asset, preferring its pre-minified `dist/web-assets/` artifact
+ * when serving the project's own `web/` dir and the built file is up to date.
+ */
+export function resolveWebAssetPath(webDir: string, relPath: string): string {
+  const srcPath = join(webDir, relPath)
+  if (webDir !== PROD_WEB_DIR) return srcPath
+  const builtPath = join(PROD_DIST_WEB_DIR, relPath)
+  try {
+    const builtStat = statSync(builtPath)
+    const srcStat = statSync(srcPath)
+    if (builtStat.mtimeMs >= srcStat.mtimeMs) return builtPath
+  } catch {
+    /* fall back to source asset when dist/web-assets/ is absent or older */
+  }
+  return srcPath
+}
 
 // Substitute the configured brand into the PWA manifest's user-visible fields
 // (name/short_name) so an install that sets BRAND_NAME shows its own name on
@@ -19,15 +40,36 @@ export function buildManifest(raw: string, brandName: string): string {
     .replace(/^(\s*"short_name"\s*:\s*)"[^"]*"/m, (_m, p: string) => `${p}${JSON.stringify(brandName)}`)
 }
 
-// Returns a short version token derived from a web asset's mtime+size so the
+// Returns a short version token derived from an asset's mtime+size so the
 // asset URL changes whenever the file changes, busting browser cache.
-function assetVersion(webDir: string, fileName: string): string {
+function assetVersionFromPath(filePath: string): string {
   try {
-    const s = statSync(join(webDir, fileName))
+    const s = statSync(filePath)
     return `${s.mtimeMs.toString(36)}-${s.size.toString(36)}`
   } catch {
     return '0'
   }
+}
+
+const indexHtmlMemo = new Map<string, Buffer>()
+const INDEX_MEMO_MAX = 12
+
+function indexMemoGet(key: string): Buffer | undefined {
+  const hit = indexHtmlMemo.get(key)
+  if (hit) {
+    indexHtmlMemo.delete(key)
+    indexHtmlMemo.set(key, hit)
+  }
+  return hit
+}
+
+function indexMemoSet(key: string, buf: Buffer): void {
+  if (indexHtmlMemo.has(key)) indexHtmlMemo.delete(key)
+  else if (indexHtmlMemo.size >= INDEX_MEMO_MAX) {
+    const oldest = indexHtmlMemo.keys().next().value
+    if (oldest !== undefined) indexHtmlMemo.delete(oldest)
+  }
+  indexHtmlMemo.set(key, buf)
 }
 
 function serveIndexHtml(ctx: RouteContext, webDir: string): void {
@@ -35,40 +77,70 @@ function serveIndexHtml(ctx: RouteContext, webDir: string): void {
   try {
     const filePath = join(webDir, 'index.html')
     const s = statSync(filePath)
-    // Both versioned asset tokens are part of the index ETag: a cached
-    // index.html must be invalidated whenever the rewritten ?v= URLs change.
-    const etag = `"${s.mtimeMs}-${s.size}-${assetVersion(webDir, 'app.js')}-${assetVersion(webDir, 'style.css')}"`
-    const ifNoneMatch = req.headers['if-none-match']
-    if (ifNoneMatch === etag) {
-      res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache' })
+    const appVer = assetVersionFromPath(resolveWebAssetPath(webDir, 'app.js'))
+    const cssVer = assetVersionFromPath(resolveWebAssetPath(webDir, 'style.css'))
+    const huVer = assetVersionFromPath(resolveWebAssetPath(webDir, 'lang/hu.js'))
+    const enVer = assetVersionFromPath(resolveWebAssetPath(webDir, 'lang/en.js'))
+    const encoding = pickEncoding(req, true)
+    // All versioned asset tokens + compression variant form the index ETag:
+    // cached index.html is invalidated whenever any ?v= URL or encoding changes.
+    const baseEtag = `${s.mtimeMs}-${s.size}-${appVer}-${cssVer}-${huVer}-${enVer}`
+    const etag = encoding ? `"${baseEtag}-${encoding}"` : `"${baseEtag}"`
+    const lastModified = s.mtime.toUTCString()
+    if (etagMatches(req.headers['if-none-match'], etag)) {
+      res.writeHead(304, {
+        ETag: etag,
+        'Last-Modified': lastModified,
+        'Cache-Control': 'no-cache',
+        Vary: 'Accept-Encoding',
+      })
       res.end()
       return
     }
-    const html = readFileSync(filePath, 'utf-8')
-      .replace(
-        /(<script\s+src=")\/app\.js(")/,
-        `$1/app.js?v=${assetVersion(webDir, 'app.js')}$2`,
-      )
-      // style.css gets the same ?v= cache-busting as app.js so both can be
-      // served with a long max-age (see tryHandleStatic below).
-      .replace(
-        /(<link\s+rel="stylesheet"\s+href=")\/style\.css(")/,
-        `$1/style.css?v=${assetVersion(webDir, 'style.css')}$2`,
-      )
-      // Bake the iOS home-screen label into apple-mobile-web-app-title so an
-      // installed PWA shows the configured main-agent name (BRAND_NAME), not the
-      // bundled "Marveen" default. Done server-side (not JS) so it is reliable
-      // at "Add to Home Screen" time regardless of script timing.
-      .replace(
-        /(<meta name="apple-mobile-web-app-title" content=")[^"]*(">)/,
-        `$1${escapeAttr(BRAND_NAME)}$2`,
-      )
+    const memoKey = `${filePath}:${BRAND_NAME}:${etag}`
+    let body = indexMemoGet(memoKey)
+    if (!body) {
+      const html = readFileSync(filePath, 'utf-8')
+        .replace(
+          /(<script\s+(?:defer\s+)?src=")\/app\.js(")/,
+          `$1/app.js?v=${appVer}$2`,
+        )
+        // style.css and lang/*.js get the same ?v= cache-busting as app.js so
+        // they can be served with a long max-age (see tryHandleStatic below).
+        .replace(
+          /(<link\s+rel="stylesheet"\s+href=")\/style\.css(")/,
+          `$1/style.css?v=${cssVer}$2`,
+        )
+        .replace(
+          /(<script\s+(?:defer\s+)?src=")\/lang\/hu\.js(")/,
+          `$1/lang/hu.js?v=${huVer}$2`,
+        )
+        .replace(
+          /(<script\s+(?:defer\s+)?src=")\/lang\/en\.js(")/,
+          `$1/lang/en.js?v=${enVer}$2`,
+        )
+        // Bake the iOS home-screen label into apple-mobile-web-app-title so an
+        // installed PWA shows the configured main-agent name (BRAND_NAME), not the
+        // bundled "Marveen" default. Done server-side (not JS) so it is reliable
+        // at "Add to Home Screen" time regardless of script timing.
+        .replace(
+          /(<meta name="apple-mobile-web-app-title" content=")[^"]*(">)/,
+          `$1${escapeAttr(BRAND_NAME)}$2`,
+        )
+      const raw = Buffer.from(html, 'utf-8')
+      body = encoding ? compressBuffer(raw, encoding) : raw
+      indexMemoSet(memoKey, body)
+    }
     res.writeHead(200, {
       'Content-Type': MIME['.html'],
+      'Content-Length': String(body.length),
       ETag: etag,
+      'Last-Modified': lastModified,
       'Cache-Control': 'no-cache',
+      Vary: 'Accept-Encoding',
+      ...(encoding ? { 'Content-Encoding': encoding } : {}),
     })
-    res.end(html)
+    res.end(req.method === 'HEAD' ? undefined : body)
   } catch {
     res.writeHead(404); res.end('Not found')
   }
@@ -103,8 +175,8 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
   // app.js/style.css URLs are versioned (?v=mtime-size, rewritten into
   // index.html above), so a long max-age is safe: any content change produces
   // a new URL. index.html itself stays no-cache.
-  if (path === '/style.css') { serveFile(req, res, join(webDir, 'style.css'), { cacheSeconds: 86400 }); return true }
-  if (path === '/app.js') { serveFile(req, res, join(webDir, 'app.js'), { cacheSeconds: 86400 }); return true }
+  if (path === '/style.css') { serveFile(req, res, resolveWebAssetPath(webDir, 'style.css'), { cacheSeconds: 86400, allowBrotli: true }); return true }
+  if (path === '/app.js') { serveFile(req, res, resolveWebAssetPath(webDir, 'app.js'), { cacheSeconds: 86400, allowBrotli: true }); return true }
   if (path === '/manifest.json') {
     // Brand the manifest (name/short_name -> BRAND_NAME, byte-preserving for the
     // shipped default via buildManifest) and, when a main-agent avatar is stored,
@@ -116,7 +188,11 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
       const branded = buildManifest(readFileSync(join(webDir, 'manifest.json'), 'utf-8'), BRAND_NAME)
       const avatarType = detectAvatarType()
       if (!avatarType) {
-        res.writeHead(200, { 'Content-Type': 'application/manifest+json', 'Cache-Control': 'no-cache' })
+        res.writeHead(200, {
+          'Content-Type': 'application/manifest+json',
+          'Content-Length': String(Buffer.byteLength(branded)),
+          'Cache-Control': 'no-cache',
+        })
         res.end(branded)
       } else {
         const manifest = JSON.parse(branded)
@@ -124,21 +200,26 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
           { src: '/api/marveen/avatar', sizes: '192x192', type: avatarType, purpose: 'any' },
           { src: '/api/marveen/avatar', sizes: '512x512', type: avatarType, purpose: 'any' },
         ]
-        res.writeHead(200, { 'Content-Type': 'application/manifest+json', 'Cache-Control': 'no-cache' })
-        res.end(JSON.stringify(manifest))
+        const payload = JSON.stringify(manifest)
+        res.writeHead(200, {
+          'Content-Type': 'application/manifest+json',
+          'Content-Length': String(Buffer.byteLength(payload)),
+          'Cache-Control': 'no-cache',
+        })
+        res.end(payload)
       }
     } catch {
       serveFile(req, res, join(webDir, 'manifest.json'))
     }
     return true
   }
-  if (path === '/sw.js') { serveFile(req, res, join(webDir, 'sw.js')); return true }
+  if (path === '/sw.js') { serveFile(req, res, join(webDir, 'sw.js'), { allowBrotli: true }); return true }
 
   if (path.startsWith('/lang/')) {
     const langFile = path.replace('/lang/', '')
     // Allowlist: only the two known language files (no path traversal).
     if (langFile === 'hu.js' || langFile === 'en.js') {
-      serveFile(req, res, join(webDir, 'lang', langFile))
+      serveFile(req, res, resolveWebAssetPath(webDir, join('lang', langFile)), { cacheSeconds: 86400, allowBrotli: true })
       return true
     }
     res.writeHead(404); res.end()
@@ -151,9 +232,7 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
       res.writeHead(404); res.end()
       return true
     }
-    const avatarPath = join(webDir, 'avatars', avatarFile)
-    if (existsSync(avatarPath)) { serveFile(req, res, avatarPath, { cacheSeconds: 3600 }); return true }
-    res.writeHead(404); res.end()
+    serveFile(req, res, join(webDir, 'avatars', avatarFile), { cacheSeconds: 3600 })
     return true
   }
 
@@ -163,9 +242,7 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
       res.writeHead(404); res.end()
       return true
     }
-    const iconPath = join(webDir, 'icons', iconFile)
-    if (existsSync(iconPath)) { serveFile(req, res, iconPath, { cacheSeconds: 3600 }); return true }
-    res.writeHead(404); res.end()
+    serveFile(req, res, join(webDir, 'icons', iconFile), { cacheSeconds: 3600 })
     return true
   }
 

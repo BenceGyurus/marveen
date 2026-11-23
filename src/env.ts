@@ -11,16 +11,32 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 // time; production never sets it.
 const PROJECT_ROOT = process.env.CLAUDECLAW_ENV_DIR ?? join(__dirname, '..')
 
+let parsedEnvCache: { content: string; parsed: Record<string, string> } | null = null
+
+function readAllEnvCached(envPath: string): Record<string, string> | null {
+  try {
+    const content = readFileSync(envPath, 'utf-8')
+    // Filesystems can assign the same timestamps to consecutive in-place edits.
+    if (parsedEnvCache?.content === content) return parsedEnvCache.parsed
+    const parsed = parseEnvContent(content)
+    parsedEnvCache = { content, parsed }
+    return parsed
+  } catch {
+    parsedEnvCache = null
+    return null
+  }
+}
+
 export function readEnvFile(keys?: string[]): Record<string, string> {
   const envPath = join(PROJECT_ROOT, '.env')
-  let content: string
-  try {
-    content = readFileSync(envPath, 'utf-8')
-  } catch {
-    return {}
+  const all = readAllEnvCached(envPath)
+  if (!all) return {}
+  if (!keys) return { ...all }
+  const out: Record<string, string> = {}
+  for (const k of keys) {
+    if (Object.hasOwn(all, k)) out[k] = all[k]!
   }
-
-  return parseEnvContent(content, keys)
+  return out
 }
 
 // The mode a newly created .env gets: it holds secrets, and install-macos.sh /
@@ -34,6 +50,7 @@ export const ENV_FILE_MODE = 0o600
 // still holding the old file open does not see them.
 export function writeEnvFileFresh(envPath: string, content: string): void {
   atomicWriteFileSync(envPath, content, { mode: ENV_FILE_MODE })
+  parsedEnvCache = null
 }
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -107,4 +124,5 @@ export function updateEnvFile(updates: Record<string, string>): void {
   let mode = ENV_FILE_MODE
   try { mode = statSync(envPath).mode & 0o777 } catch { /* no .env yet */ }
   atomicWriteFileSync(envPath, out.join('\n'), { mode })
+  parsedEnvCache = null
 }

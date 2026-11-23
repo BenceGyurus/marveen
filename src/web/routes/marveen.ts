@@ -14,7 +14,7 @@ import { gateManualRestart, MANUAL_RESTART_FORCE_HINT, wantsForceRestart } from 
 import { readFileOr } from '../agent-config.js'
 import { nicknameFor } from '../team-nicknames.js'
 import { parseMultipart } from '../multipart.js'
-import { readBody, json, serveFile } from '../http-helpers.js'
+import { readBody, json, jsonMaybeGzip, serveFile } from '../http-helpers.js'
 import { MAIN_CHANNELS_SESSION } from '../main-agent.js'
 import { readActiveModelFromProjectDir, readAltCliActiveModel, readContextTokensFromProjectDir } from '../active-model.js'
 import { readAutoRestartConfig } from '../auto-restart-store.js'
@@ -97,7 +97,8 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
     // legacy backend), `agentId` = canonical MAIN_AGENT_ID so the dashboard can
     // hit /api/agents/<id>/skills for the main agent.
     const idCore = buildMarveenIdentityCore(currentBotName(), currentBrandName(), MAIN_AGENT_ID)
-    json(res, {
+    const activeModel = getActiveMarveenModel()
+    jsonMaybeGzip(req, res, {
       ...idCore,
       // Configured owner display name (OWNER_NAME). The dashboard chat view uses
       // this to pin/label the owner's own message thread instead of a hardcoded
@@ -106,8 +107,8 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
       // Character nickname (store/team-nicknames.json), same field as on /api/agents.
       nickname: nicknameFor(currentBotName()),
       description,
-      model: getActiveMarveenModel(),
-      cliType: getCliTypeForModel(getActiveMarveenModel()),
+      model: activeModel,
+      cliType: getCliTypeForModel(activeModel),
       tmuxSession: MAIN_CHANNELS_SESSION,
       running: true,
       // Auto-restart applies to the main channels session too; key it by the

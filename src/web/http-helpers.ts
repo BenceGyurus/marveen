@@ -1,7 +1,7 @@
 import http from 'node:http'
 import { readFileSync, statSync } from 'node:fs'
 import { extname } from 'node:path'
-import { gzipSync } from 'node:zlib'
+import { brotliCompressSync, constants as zlibConstants, gzipSync } from 'node:zlib'
 
 export const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -109,11 +109,13 @@ export function json(res: http.ServerResponse, data: unknown, status = 200): voi
   // Cache-Control: private, no-store prevents CDN / proxy caching of API
   // responses that may contain user-specific data or session state. Without
   // this header, intermediate caches can serve stale or cross-user data.
+  const body = JSON.stringify(data)
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'private, no-store',
+    'Content-Length': String(Buffer.byteLength(body)),
   })
-  res.end(JSON.stringify(data))
+  res.end(body)
 }
 
 /**
@@ -145,12 +147,25 @@ export function methodNotAllowed(res: http.ServerResponse, method: string, allow
 const GZIP_EXTENSIONS = new Set(['.html', '.css', '.js', '.json', '.svg'])
 const GZIP_MIN_BYTES = 1024
 
-function acceptsGzip(req: http.IncomingMessage): boolean {
+export function acceptsGzip(req: http.IncomingMessage): boolean {
   const raw = req.headers['accept-encoding']
   const value = Array.isArray(raw) ? raw.join(', ') : raw
   if (!value) return false
   // Match a gzip token that is not explicitly disabled with q=0.
   return /(^|,)\s*gzip\s*(;\s*q=(?!0(\.0*)?\s*(,|$))[\d.]+)?\s*(,|$)/i.test(value)
+}
+
+export function acceptsBrotli(req: http.IncomingMessage): boolean {
+  const raw = req.headers['accept-encoding']
+  const value = Array.isArray(raw) ? raw.join(', ') : raw
+  if (!value) return false
+  return /(^|,)\s*br\s*(;\s*q=(?!0(\.0*)?\s*(,|$))[\d.]+)?\s*(,|$)/i.test(value)
+}
+
+export function pickEncoding(req: http.IncomingMessage, allowBrotli = false): 'br' | 'gzip' | null {
+  if (allowBrotli && acceptsBrotli(req)) return 'br'
+  if (acceptsGzip(req)) return 'gzip'
+  return null
 }
 
 /**
@@ -172,33 +187,52 @@ export function jsonMaybeGzip(
     Vary: 'Accept-Encoding',
   }
   if (body.length > GZIP_MIN_BYTES && acceptsGzip(req)) {
+    const gz = gzipSync(body, { level: 4 })
     headers['Content-Encoding'] = 'gzip'
+    headers['Content-Length'] = String(gz.length)
     res.writeHead(status, headers)
-    res.end(gzipSync(body))
+    res.end(gz)
     return
   }
+  headers['Content-Length'] = String(body.length)
   res.writeHead(status, headers)
   res.end(body)
 }
 
-// Memo of gzipped file bodies keyed by filePath + etag so hot assets (app.js
-// is ~670KB) are compressed once per content version, not per request. The
-// etag in the key self-invalidates on file change; the size cap bounds RAM
-// (dashboard serves only a handful of distinct compressible files).
-const gzipMemo = new Map<string, Buffer>()
-const GZIP_MEMO_MAX_ENTRIES = 20
+// In-memory static asset cache keyed by `${filePath}:${etag}` so hot assets
+// (compressed or raw) are read and compressed once per version instead of on
+// every request. The etag self-invalidates when mtimeMs or size changes.
+const assetMemo = new Map<string, Buffer>()
+const ASSET_MEMO_MAX_ENTRIES = 64
+const ASSET_MEMO_MAX_ITEM_BYTES = 2 * 1024 * 1024
 
-function gzipFileCached(filePath: string, etag: string, data: Buffer): Buffer {
-  const key = `${filePath}:${etag}`
-  const hit = gzipMemo.get(key)
-  if (hit) return hit
-  const gz = gzipSync(data)
-  if (gzipMemo.size >= GZIP_MEMO_MAX_ENTRIES) {
-    const oldest = gzipMemo.keys().next().value
-    if (oldest !== undefined) gzipMemo.delete(oldest)
+function assetMemoGet(key: string): Buffer | undefined {
+  const hit = assetMemo.get(key)
+  if (hit) {
+    // Refresh insertion order so hot assets stay resident.
+    assetMemo.delete(key)
+    assetMemo.set(key, hit)
   }
-  gzipMemo.set(key, gz)
-  return gz
+  return hit
+}
+
+function assetMemoSet(key: string, buf: Buffer): void {
+  if (buf.length > ASSET_MEMO_MAX_ITEM_BYTES) return
+  if (assetMemo.has(key)) assetMemo.delete(key)
+  else if (assetMemo.size >= ASSET_MEMO_MAX_ENTRIES) {
+    const oldest = assetMemo.keys().next().value
+    if (oldest !== undefined) assetMemo.delete(oldest)
+  }
+  assetMemo.set(key, buf)
+}
+
+export function compressBuffer(data: Buffer, encoding: 'br' | 'gzip'): Buffer {
+  if (encoding === 'br') {
+    return brotliCompressSync(data, {
+      params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 5 },
+    })
+  }
+  return gzipSync(data, { level: 6 })
 }
 
 /**
@@ -224,7 +258,7 @@ export function serveFile(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   filePath: string,
-  opts: { cacheSeconds?: number } = {},
+  opts: { cacheSeconds?: number; allowBrotli?: boolean } = {},
 ): void {
   try {
     const stat = statSync(filePath)
@@ -237,16 +271,16 @@ export function serveFile(
     const cacheControl = opts.cacheSeconds
       ? `private, max-age=${opts.cacheSeconds}`
       : 'no-cache'
-    // ETag: "<mtime_ms>-<size>" -- cheap to compute, stable across identical
-    // file content at the same path, and invalidated automatically on any
-    // write (mtime advances). Quoted string as required by RFC 7232. The gzip
-    // variant gets a distinct "-gz" etag so caches never hand a gzipped body
-    // to a client that did not ask for it; the 304 comparison below runs
-    // against the variant this client would receive.
-    const wantGzip = GZIP_EXTENSIONS.has(ext) && stat.size > GZIP_MIN_BYTES && acceptsGzip(req)
-    const etag = wantGzip
-      ? `"${stat.mtimeMs}-${stat.size}-gz"`
-      : `"${stat.mtimeMs}-${stat.size}"`
+    // ETag: "<mtime_ms>-<size>" (plus "-br" / "-gz" for compressed variants) so
+    // caches never cross-serve compressed and uncompressed bodies.
+    const encoding = GZIP_EXTENSIONS.has(ext) && stat.size > GZIP_MIN_BYTES
+      ? pickEncoding(req, opts.allowBrotli === true)
+      : null
+    const etag = encoding === 'br'
+      ? `"${stat.mtimeMs}-${stat.size}-br"`
+      : encoding === 'gzip'
+        ? `"${stat.mtimeMs}-${stat.size}-gz"`
+        : `"${stat.mtimeMs}-${stat.size}"`
     const lastModified = stat.mtime.toUTCString()
     const varyHeaders: Record<string, string> = GZIP_EXTENSIONS.has(ext)
       ? { Vary: 'Accept-Encoding' }
@@ -265,17 +299,23 @@ export function serveFile(
       return
     }
 
-    const data = readFileSync(filePath)
-    const body = wantGzip ? gzipFileCached(filePath, etag, data) : data
+    const memoKey = `${filePath}:${etag}`
+    let body = assetMemoGet(memoKey)
+    if (!body) {
+      const data = readFileSync(filePath)
+      body = encoding ? compressBuffer(data, encoding) : data
+      assetMemoSet(memoKey, body)
+    }
     res.writeHead(200, {
       'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Content-Length': String(body.length),
       ETag: etag,
       'Last-Modified': lastModified,
       'Cache-Control': cacheControl,
       ...varyHeaders,
-      ...(wantGzip ? { 'Content-Encoding': 'gzip' } : {}),
+      ...(encoding ? { 'Content-Encoding': encoding } : {}),
     })
-    res.end(body)
+    res.end(req.method === 'HEAD' ? undefined : body)
   } catch {
     res.writeHead(404)
     res.end('Not found')

@@ -57,6 +57,7 @@ import { listAgentSummaries, tryHandleAgents, type AgentSummary } from './agents
 import { tryHandleAgentTerminal } from './agent-terminal.js'
 import { isHttps } from './auth.js'
 import { readFleetQuota } from './overview.js'
+import { resolveWebAssetPath } from './static.js'
 import { tryHandleUpdates } from './updates.js'
 import type { RouteContext } from './types.js'
 
@@ -261,11 +262,11 @@ export async function tryHandleOperator(ctx: RouteContext, webDir: string): Prom
   // The operator page. Public like every static file: it holds no data, and
   // everything it shows comes from the gated endpoints below.
   if ((path === '/operator' || path === '/operator.html') && (method === 'GET' || method === 'HEAD')) {
-    serveFile(req, res, join(webDir, 'operator.html'))
+    serveFile(req, res, join(webDir, 'operator.html'), { allowBrotli: true })
     return true
   }
   if (path === '/operator.js' && method === 'GET') {
-    serveFile(req, res, join(webDir, 'operator.js'))
+    serveFile(req, res, resolveWebAssetPath(webDir, 'operator.js'), { allowBrotli: true })
     return true
   }
 

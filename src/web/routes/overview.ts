@@ -8,7 +8,7 @@ import {
 } from '../agent-config.js'
 import { readAgentTeam } from '../agent-team.js'
 import { agentDisplayLabel } from '../agent-display-label.js'
-import { isAgentRunning } from '../agent-process.js'
+import { isAgentRunning, withTmuxBatch } from '../agent-process.js'
 import { json, jsonMaybeGzip } from '../http-helpers.js'
 import { readQuotaSnapshot, DEFAULT_MAX_AGE_SEC, readFableSnapshot, DEFAULT_FABLE_MAX_AGE_SEC, readModQuotaSnapshot, chooseQuotaSnapshot, type QuotaSnapshot } from '../quota.js'
 import { STATE_OBSERVER_STATE_DIR } from '../state-observer.js'
@@ -43,12 +43,16 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/overview' && method === 'GET') {
     const subAgents = listAgentNames()
-    const running = subAgents.filter(n => isAgentRunning(n)).length + 1
+    const runningMap = withTmuxBatch(() => new Map(subAgents.map(a => [a, isAgentRunning(a)])))
+    let runningSubCount = 0
+    for (const up of runningMap.values()) if (up) runningSubCount++
+    const running = runningSubCount + 1
     const total = subAgents.length + 1
 
     const db0 = getDb()
-    const memStats = db0.prepare("SELECT COUNT(*) as c FROM memories").get() as { c: number }
-    const memCats = db0.prepare("SELECT COUNT(DISTINCT category) as c FROM memories").get() as { c: number }
+    const memRow = db0.prepare("SELECT COUNT(*) as c, COUNT(DISTINCT category) as cats FROM memories").get() as { c: number; cats: number }
+    const memStats = { c: memRow.c }
+    const memCats = { c: memRow.cats }
 
     const startOfDay = new Date()
     startOfDay.setHours(0, 0, 0, 0)
@@ -120,7 +124,7 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
         id: a,
         label: readAgentDisplayName(a),
         role: team.role,
-        running: isAgentRunning(a),
+        running: runningMap.get(a) ?? false,
         hasAvatar: existsSync(join(agentDir(a), 'avatar.png')),
         avatarUrl: `/api/agents/${encodeURIComponent(a)}/avatar`,
       })

@@ -296,6 +296,16 @@ function digest(s: string): Buffer {
   return createHash('sha256').update(s, 'utf-8').digest()
 }
 
+function matchAgentTokenDigests(provided: string, digests: ReadonlyMap<string, Buffer>): string | null {
+  if (!provided || digests.size === 0) return null
+  const p = digest(provided)
+  let hit: string | null = null
+  for (const [name, tokDigest] of digests) {
+    if (timingSafeEqual(p, tokDigest) && hit === null) hit = name
+  }
+  return hit
+}
+
 /**
  * Timing-safe lookup of a presented token among agent tokens. Compares
  * fixed-length SHA-256 digests (no length oracle) and walks every entry even
@@ -330,17 +340,20 @@ export function createAgentTokenResolver(
   const baseDir = opts.baseDir ?? agentsBaseDir()
   const ttlMs = opts.ttlMs ?? 5000
   const now = opts.now ?? Date.now
-  let cache: Map<string, string> = new Map()
+  let cacheDigests: Map<string, Buffer> = new Map()
   let loadedAt = -Infinity
   let loadedGeneration = -1
   return (provided: string) => {
     const t = now()
     if (t - loadedAt >= ttlMs || loadedGeneration !== tokenGeneration) {
-      cache = loadAgentTokens(baseDir, opts.mainToken === undefined ? readMainTokenValue() : opts.mainToken)
+      const raw = loadAgentTokens(baseDir, opts.mainToken === undefined ? readMainTokenValue() : opts.mainToken)
+      const next = new Map<string, Buffer>()
+      for (const [name, tok] of raw) next.set(name, digest(tok))
+      cacheDigests = next
       loadedAt = t
       loadedGeneration = tokenGeneration
     }
-    return matchAgentToken(provided, cache)
+    return matchAgentTokenDigests(provided, cacheDigests)
   }
 }
 

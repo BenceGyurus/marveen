@@ -1,7 +1,7 @@
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { listAgentNames, readAgentRemoteHost } from './agent-config.js'
-import { isAgentRunning, captureParkedInputView, sendEnterToSession, capturePaneAsync } from './agent-process.js'
+import { isAgentRunning, withTmuxBatch, captureParkedInputView, sendEnterToSession, capturePaneAsync } from './agent-process.js'
 import { resolveAgentSession } from './channel-mcp-reconnect.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { recoverStuckInputForSession, sendAlert } from './channel-monitor.js'
@@ -315,8 +315,10 @@ export function startStuckInputWatcher(): NodeJS.Timeout {
     } catch (err) {
       logger.debug({ err }, 'stuck-input-watcher: main agent check error')
     }
-    for (const name of listAgentNames()) {
-      if (!isAgentRunning(name)) {
+    const names = listAgentNames()
+    const runningSet = withTmuxBatch(() => new Set(names.filter(isAgentRunning)))
+    for (const name of names) {
+      if (!runningSet.has(name)) {
         watchState.delete(resolveAgentSession(name))
         continue
       }

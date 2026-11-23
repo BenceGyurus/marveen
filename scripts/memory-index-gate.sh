@@ -84,7 +84,7 @@ LINEWARN=800
 # ("# Téma-hubok"), mind a 24 pillanatkepben. A ketkettoskeresztes minta NULLA
 # talalatot ad -- azzal a kapu az EGESZ lapot forronak latna, es a hatar nema
 # modon nem letezne. Ezert 1-2 kettoskereszt engedve.
-HOTEND='^#{1,2} Téma-hubok'
+HOTEND='^##? Téma-hubok'
 
 if [ "$1" = "--selftest" ]; then
   echo "index: $IDX"

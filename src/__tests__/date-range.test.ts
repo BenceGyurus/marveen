@@ -87,3 +87,9 @@ describe('install-zone day boundaries', () => {
     expect(b - a).toBe(1)
   })
 })
+
+it('rejects impossible days and reversed ranges in recall', () => {
+  for (const input of ['2026-02-29', 'február 30', '2026-05-19 - 2026-05-18']) {
+    expect(parseDateExpr(input, TUE)).toBeNull()
+  }
+})

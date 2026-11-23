@@ -1,6 +1,6 @@
 import { recallByDateRange, recallSearch, getDailyLogDates } from '../../db.js'
 import { MAIN_AGENT_ID, APP_TZ } from '../../config.js'
-import { json } from '../http-helpers.js'
+import { json, jsonMaybeGzip } from '../http-helpers.js'
 import { parseDateExpr } from '../../date-range.js'
 import type { RouteContext } from './types.js'
 
@@ -14,18 +14,25 @@ function todayBudapest(): string {
 export const parseDateExpression = parseDateExpr
 
 export async function tryHandleRecall(ctx: RouteContext): Promise<boolean> {
-  const { res, path, method, url } = ctx
+  const { req, res, path, method, url } = ctx
 
-  if (path === '/api/recall' && method === 'GET') {
+  if (method !== 'GET' || (path !== '/api/recall' && path !== '/api/recall/dates')) return false
+  const rawLimit = url.searchParams.get('limit')
+  if (rawLimit && !/^\d+$/.test(rawLimit)) {
+    json(res, { error: 'limit must be a non-negative integer' }, 400)
+    return true
+  }
+
+  if (path === '/api/recall') {
     const dateExpr = url.searchParams.get('date') || ''
     const query = url.searchParams.get('q') || ''
     const agent = url.searchParams.get('agent') || undefined
-    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200)
+    const limit = Math.min(Number(rawLimit || 50), 200)
 
     if (query && !dateExpr) {
       const result = recallSearch(query, agent, limit)
       const formatted = formatRecallResult(result)
-      json(res, formatted)
+      jsonMaybeGzip(req, res, formatted)
       return true
     }
 
@@ -35,30 +42,15 @@ export async function tryHandleRecall(ctx: RouteContext): Promise<boolean> {
       return true
     }
 
-    const result = recallByDateRange(range.from, range.to, agent)
-
-    if (query) {
-      // A plain JS substring test, so the query is compared as typed. The LIKE
-      // escaper (db.ts escapeLike) is only for `LIKE ? ESCAPE '\'`: applied
-      // here it turned `22%` into `22\%`, so nothing containing `%` or `_`
-      // could ever match.
-      const qLower = query.toLowerCase()
-      result.logs = result.logs.filter(l => l.content.toLowerCase().includes(qLower))
-      result.memories = result.memories.filter(m => m.content.toLowerCase().includes(qLower) || (m.keywords || '').toLowerCase().includes(qLower))
-    }
-
-    json(res, formatRecallResult(result))
+    const result = recallByDateRange(range.from, range.to, agent, { query, limit: rawLimit ? limit : undefined })
+    jsonMaybeGzip(req, res, { ...formatRecallResult(result), hasMore: result.hasMore })
     return true
   }
 
-  if (path === '/api/recall/dates' && method === 'GET') {
-    const agent = url.searchParams.get('agent') || MAIN_AGENT_ID
-    const limit = Math.min(parseInt(url.searchParams.get('limit') || '90', 10), 365)
-    json(res, getDailyLogDates(agent, limit))
-    return true
-  }
-
-  return false
+  const agent = url.searchParams.get('agent') || MAIN_AGENT_ID
+  const limit = Math.min(Number(rawLimit || 90), 365)
+  jsonMaybeGzip(req, res, getDailyLogDates(agent, limit))
+  return true
 }
 
 function formatRecallResult(result: { logs: any[]; memories: any[]; dateRange: { from: string; to: string } }) {

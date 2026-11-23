@@ -65,6 +65,75 @@ export function readFileOr(path: string, fallback: string): string {
   try { return readFileSync(path, 'utf-8') } catch { return fallback }
 }
 
+interface AgentConfigCacheEntry {
+  mtimeMs: number
+  ctimeMs: number
+  size: number
+  ino: number
+  valid: boolean
+  raw: unknown
+}
+
+const agentConfigCache = new Map<string, AgentConfigCacheEntry>()
+const AGENT_CONFIG_CACHE_MAX = 500
+
+export function invalidateAgentConfigCache(configPath?: string): void {
+  if (configPath) agentConfigCache.delete(configPath)
+  else agentConfigCache.clear()
+}
+
+function readAgentConfigParsed(configPath: string): { valid: boolean; raw: unknown } {
+  let st: ReturnType<typeof statSync>
+  try {
+    st = statSync(configPath)
+  } catch {
+    agentConfigCache.delete(configPath)
+    return { valid: true, raw: {} }
+  }
+  const hit = agentConfigCache.get(configPath)
+  if (
+    hit &&
+    hit.mtimeMs === st.mtimeMs &&
+    hit.ctimeMs === st.ctimeMs &&
+    hit.size === st.size &&
+    hit.ino === st.ino
+  ) {
+    return { valid: hit.valid, raw: hit.raw }
+  }
+  let valid = true
+  let raw: unknown = {}
+  try {
+    raw = JSON.parse(readFileSync(configPath, 'utf-8'))
+  } catch {
+    valid = false
+    raw = null
+  }
+  if (!agentConfigCache.has(configPath) && agentConfigCache.size >= AGENT_CONFIG_CACHE_MAX) {
+    const oldest = agentConfigCache.keys().next().value
+    if (oldest !== undefined) agentConfigCache.delete(oldest)
+  }
+  agentConfigCache.set(configPath, {
+    mtimeMs: st.mtimeMs,
+    ctimeMs: st.ctimeMs,
+    size: st.size,
+    ino: st.ino,
+    valid,
+    raw,
+  })
+  return { valid, raw }
+}
+
+function readAgentConfigRecordAt(configPath: string): Record<string, unknown> | null {
+  const { valid, raw } = readAgentConfigParsed(configPath)
+  if (!valid || !raw || typeof raw !== 'object') return null
+  return raw as Record<string, unknown>
+}
+
+export function readAgentConfigObject(name: string): Record<string, unknown> {
+  const rec = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  return rec ? { ...rec } : {}
+}
+
 // JSONCLOBBER926 (card 035e46d0): the read half of every read-modify-write on a
 // JSON config file (agent-config.json, .mcp.json, settings.json, task-config).
 // Until now each site did `try { JSON.parse(readFileOr(path, '{}')) } catch {}`
@@ -167,12 +236,8 @@ export function invalidateModelProfileMapCache(): void {
 // on a given model (the /api/agents payload, the profile canary).
 export function resolveAgentModelDetailed(name: string): ModelResolution {
   const configPath = join(agentDir(name), 'agent-config.json')
-  let config: AgentModelConfig
-  try {
-    config = JSON.parse(readFileOr(configPath, '{}')) as AgentModelConfig
-  } catch {
-    return { model: DEFAULT_MODEL, source: 'default' }
-  }
+  const config = readAgentConfigRecordAt(configPath) as AgentModelConfig | null
+  if (!config) return { model: DEFAULT_MODEL, source: 'default' }
   return resolveAgentModelFromConfig(config, readModelProfileMap(), DEFAULT_MODEL, resolveModelId)
 }
 
@@ -193,6 +258,7 @@ export function writeAgentModelProfile(name: string, profile: string | null): vo
   if (profile === null) delete config.modelProfile
   else config.modelProfile = profile
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 export function writeAgentModel(name: string, model: string): void {
@@ -202,15 +268,13 @@ export function writeAgentModel(name: string, model: string): void {
   config = readJsonObjectForWrite(configPath)
   config.model = model
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 export function readAgentDisplayName(name: string): string {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    const raw = typeof config.displayName === 'string' ? config.displayName.trim() : ''
-    if (raw) return raw
-  } catch { /* fall through */ }
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  const raw = config && typeof config.displayName === 'string' ? config.displayName.trim() : ''
+  if (raw) return raw
   // Fall back to a title-cased version of the sanitized name.
   return name.charAt(0).toUpperCase() + name.slice(1)
 }
@@ -221,6 +285,7 @@ export function writeAgentDisplayName(name: string, displayName: string): void {
   config = readJsonObjectForWrite(configPath)
   config.displayName = displayName
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 // A short, owner-written role line ("P+R", "JIRA ügyintéző") shown under the
@@ -230,11 +295,8 @@ export function writeAgentDisplayName(name: string, displayName: string): void {
 export const AGENT_TAGLINE_MAX = 60
 
 export function readAgentTagline(name: string): string {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    if (typeof config.tagline === 'string') return config.tagline.trim().slice(0, AGENT_TAGLINE_MAX)
-  } catch { /* fall through */ }
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  if (config && typeof config.tagline === 'string') return config.tagline.trim().slice(0, AGENT_TAGLINE_MAX)
   return ''
 }
 
@@ -245,16 +307,14 @@ export function writeAgentTagline(name: string, tagline: string): void {
   if (clean) config.tagline = clean
   else delete config.tagline
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 export function readAgentSecurityProfile(name: string): string {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    if (typeof config.securityProfile === 'string' && config.securityProfile.trim()) {
-      return config.securityProfile.trim()
-    }
-  } catch { /* fall through */ }
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  if (config && typeof config.securityProfile === 'string' && config.securityProfile.trim()) {
+    return config.securityProfile.trim()
+  }
   return 'default'
 }
 
@@ -269,16 +329,20 @@ export { expandAndValidateConfigDir } from '../config-dir-path.js'
 // CLAUDE_CONFIG_DIR, or null when the field is missing/blank/non-string or
 // the JSON is unparseable. Tilde forms are expanded against the supplied
 // homeDir. Kept dependency-free so it can be unit-tested without the fs.
+function resolveClaudeConfigDirFromObj(config: unknown, homeDir: string): string | null {
+  if (!config || typeof config !== 'object') return null
+  const value = (config as Record<string, unknown>).claudeConfigDir
+  if (typeof value !== 'string') return null
+  return expandAndValidateConfigDir(value, homeDir)
+}
+
 export function resolveClaudeConfigDir(
   rawConfigJson: string,
   homeDir: string,
 ): string | null {
   let config: unknown
   try { config = JSON.parse(rawConfigJson) } catch { return null }
-  if (!config || typeof config !== 'object') return null
-  const value = (config as Record<string, unknown>).claudeConfigDir
-  if (typeof value !== 'string') return null
-  return expandAndValidateConfigDir(value, homeDir)
+  return resolveClaudeConfigDirFromObj(config, homeDir)
 }
 
 // Optional per-agent override for the Claude Code config directory. When set,
@@ -288,7 +352,8 @@ export function resolveClaudeConfigDir(
 // default location (`~/.claude/` on macOS/Linux).
 export function readAgentClaudeConfigDir(name: string): string | null {
   const configPath = join(agentDir(name), 'agent-config.json')
-  return resolveClaudeConfigDir(readFileOr(configPath, '{}'), homedir())
+  const { valid, raw } = readAgentConfigParsed(configPath)
+  return valid ? resolveClaudeConfigDirFromObj(raw, homedir()) : null
 }
 
 // --- Remote agent config (remoteHost + remoteWorkdir) ---
@@ -315,14 +380,8 @@ export interface RemoteAgentConfig {
   workdir: string | null
 }
 
-// Pure resolver: takes the raw agent-config.json text and returns the remote
-// {host, workdir}. An agent is "remote" only when BOTH validate; a
-// half-configured agent (host set but workdir invalid, or vice-versa) is
-// treated as local (both null) so it never launches into an undefined dir.
-export function resolveRemoteConfig(rawConfigJson: string): RemoteAgentConfig {
+function resolveRemoteConfigFromObj(config: unknown): RemoteAgentConfig {
   const NONE: RemoteAgentConfig = { host: null, workdir: null }
-  let config: unknown
-  try { config = JSON.parse(rawConfigJson) } catch { return NONE }
   if (!config || typeof config !== 'object') return NONE
   const rawHost = (config as Record<string, unknown>).remoteHost
   const rawWorkdir = (config as Record<string, unknown>).remoteWorkdir
@@ -336,9 +395,20 @@ export function resolveRemoteConfig(rawConfigJson: string): RemoteAgentConfig {
   return { host, workdir }
 }
 
+// Pure resolver: takes the raw agent-config.json text and returns the remote
+// {host, workdir}. An agent is "remote" only when BOTH validate; a
+// half-configured agent (host set but workdir invalid, or vice-versa) is
+// treated as local (both null) so it never launches into an undefined dir.
+export function resolveRemoteConfig(rawConfigJson: string): RemoteAgentConfig {
+  let config: unknown
+  try { config = JSON.parse(rawConfigJson) } catch { return { host: null, workdir: null } }
+  return resolveRemoteConfigFromObj(config)
+}
+
 export function readAgentRemoteConfig(name: string): RemoteAgentConfig {
   const configPath = join(agentDir(name), 'agent-config.json')
-  return resolveRemoteConfig(readFileOr(configPath, '{}'))
+  const { valid, raw } = readAgentConfigParsed(configPath)
+  return valid ? resolveRemoteConfigFromObj(raw) : { host: null, workdir: null }
 }
 
 // Convenience for the many callers that only need the host to decide whether a
@@ -352,6 +422,15 @@ export function readAgentRemoteHost(name: string): string | null {
 // is rejected rather than escaped. 32 chars is the useradd limit.
 const RUN_AS_USER_ALLOWED = /^[a-z_][a-z0-9_-]{0,31}$/
 
+function resolveRunAsUserFromObj(config: unknown): string | null {
+  if (!config || typeof config !== 'object') return null
+  const raw = (config as Record<string, unknown>).runAsUser
+  if (typeof raw !== 'string') return null
+  const user = raw.trim()
+  if (!user || !RUN_AS_USER_ALLOWED.test(user)) return null
+  return user
+}
+
 // Pure resolver: which OS user this agent's tmux server belongs to, or null when
 // the agent shares the router's own user (today's default for every agent).
 //
@@ -363,17 +442,13 @@ const RUN_AS_USER_ALLOWED = /^[a-z_][a-z0-9_-]{0,31}$/
 export function resolveRunAsUser(rawConfigJson: string): string | null {
   let config: unknown
   try { config = JSON.parse(rawConfigJson) } catch { return null }
-  if (!config || typeof config !== 'object') return null
-  const raw = (config as Record<string, unknown>).runAsUser
-  if (typeof raw !== 'string') return null
-  const user = raw.trim()
-  if (!user || !RUN_AS_USER_ALLOWED.test(user)) return null
-  return user
+  return resolveRunAsUserFromObj(config)
 }
 
 export function readAgentRunAsUser(name: string): string | null {
   const configPath = join(agentDir(name), 'agent-config.json')
-  return resolveRunAsUser(readFileOr(configPath, '{}'))
+  const { valid, raw } = readAgentConfigParsed(configPath)
+  return valid ? resolveRunAsUserFromObj(raw) : null
 }
 
 // Validate-and-persist the remote config. Empty strings clear the fields
@@ -395,6 +470,7 @@ export function writeAgentRemoteConfig(
     delete config.remoteHost
     delete config.remoteWorkdir
     atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+    invalidateAgentConfigCache(configPath)
     return { ok: true, remote: { host: null, workdir: null } }
   }
 
@@ -412,17 +488,15 @@ export function writeAgentRemoteConfig(
   config.remoteHost = probe.host
   config.remoteWorkdir = probe.workdir
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
   return { ok: true, remote: probe }
 }
 
 export function readAgentChannelProvider(name: string): string | null {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    if (typeof config.channelProvider === 'string' && config.channelProvider.trim()) {
-      return config.channelProvider.trim()
-    }
-  } catch { /* fall through */ }
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  if (config && typeof config.channelProvider === 'string' && config.channelProvider.trim()) {
+    return config.channelProvider.trim()
+  }
   return null
 }
 
@@ -432,6 +506,7 @@ export function writeAgentChannelProvider(name: string, provider: string): void 
   config = readJsonObjectForWrite(configPath)
   config.channelProvider = provider
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 // Per-agent CO-LISTEN channels (AGENTEXTRACH1006): providers an agent serves IN
@@ -440,24 +515,16 @@ export function writeAgentChannelProvider(name: string, provider: string): void 
 // Absent field -> [] -> the launch is byte-identical to before. Unknown values
 // and the primary provider itself are dropped (see parseExtraChannels).
 export function readAgentExtraChannels(name: string): ChannelProviderType[] {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}')) as Record<string, unknown>
-    const primary = typeof config.channelProvider === 'string' ? config.channelProvider.trim() || null : null
-    return parseExtraChannels(config.extraChannels, primary)
-  } catch {
-    return []
-  }
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  if (!config) return []
+  const primary = typeof config.channelProvider === 'string' ? config.channelProvider.trim() || null : null
+  return parseExtraChannels(config.extraChannels, primary)
 }
 
 // GROMZOAGENTS1028: whether the agent also listens on Gromzo (agent-config `gromzo: true`).
 export function readAgentGromzo(name: string): boolean {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    return wantsGromzo((JSON.parse(readFileOr(configPath, '{}')) as Record<string, unknown>).gromzo)
-  } catch {
-    return false
-  }
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  return config ? wantsGromzo(config.gromzo) : false
 }
 
 // GROMZOAGENTPICK1101: the dashboard's switch writes the same flag readAgentGromzo reads.
@@ -467,6 +534,7 @@ export function writeAgentGromzo(name: string, on: boolean): void {
   if (on) config.gromzo = true
   else delete config.gromzo
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 export function writeAgentExtraChannels(name: string, extras: readonly string[]): void {
@@ -477,6 +545,7 @@ export function writeAgentExtraChannels(name: string, extras: readonly string[])
   if (clean.length > 0) config.extraChannels = clean
   else delete config.extraChannels
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 export type AuthMode = 'shared' | 'own_team' | 'api'
@@ -484,13 +553,10 @@ export type AuthMode = 'shared' | 'own_team' | 'api'
 const VALID_AUTH_MODES = new Set<AuthMode>(['shared', 'own_team', 'api'])
 
 export function readAgentAuthMode(name: string): AuthMode {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    if (typeof config.authMode === 'string' && VALID_AUTH_MODES.has(config.authMode as AuthMode)) {
-      return config.authMode as AuthMode
-    }
-  } catch { /* fall through */ }
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  if (config && typeof config.authMode === 'string' && VALID_AUTH_MODES.has(config.authMode as AuthMode)) {
+    return config.authMode as AuthMode
+  }
   return 'shared'
 }
 
@@ -500,12 +566,8 @@ export function readAgentAuthMode(name: string): AuthMode {
 // the shared install-root key. See src/web/memory-boundary.ts for the full
 // mechanism and trade-offs. Absent/false = current shared behavior, unchanged.
 export function readAgentMemoryIsolation(name: string): boolean {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    return config.memoryIsolation === true
-  } catch { /* fall through */ }
-  return false
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  return config?.memoryIsolation === true
 }
 
 // Persist the opt-in memoryIsolation flag. `false` removes the key so the
@@ -517,18 +579,15 @@ export function writeAgentMemoryIsolation(name: string, enabled: boolean): void 
   if (enabled) config.memoryIsolation = true
   else delete config.memoryIsolation
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 // Opt-in per-agent agent-state-observer mod (default OFF, MODSTERMEK1005).
 // When true the launcher loads plugins/agent-state-observer for this agent's
 // session (see state-observer.ts for the version gate and what it writes).
 export function readAgentStateObserver(name: string): boolean {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    return config.stateObserver === true
-  } catch { /* fall through */ }
-  return false
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  return config?.stateObserver === true
 }
 
 // ---- per-agent sender-role gate (hook wiring) --------------------------------
@@ -580,12 +639,8 @@ export function readAgentSenderRoleGatePolicy(name: string, gatesPath: string = 
 
 /** Whether the agent's own agent-config.json still carries a senderRoleGate, which is ignored now (the launcher logs it). */
 export function agentConfigCarriesSenderRoleGate(name: string): boolean {
-  try {
-    const cfg: unknown = JSON.parse(readFileOr(join(agentDir(name), 'agent-config.json'), '{}'))
-    return !!cfg && typeof cfg === 'object' && !Array.isArray(cfg) && Object.hasOwn(cfg, 'senderRoleGate')
-  } catch {
-    return false
-  }
+  const { valid, raw } = readAgentConfigParsed(join(agentDir(name), 'agent-config.json'))
+  return valid && !!raw && typeof raw === 'object' && !Array.isArray(raw) && Object.hasOwn(raw, 'senderRoleGate')
 }
 
 // Opt-in per-agent worksource channel (default OFF). When true the router hands
@@ -602,12 +657,8 @@ export function agentConfigCarriesSenderRoleGate(name: string): boolean {
 // caused purely by wiring. Keeping this orthogonal is what lets a worksource
 // agent stay invisible to every chat-channel monitor.
 export function readAgentWorksourceChannel(name: string): boolean {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    return config.worksourceChannel === true
-  } catch { /* fall through */ }
-  return false
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  return config?.worksourceChannel === true
 }
 
 // Opt-in PULL delivery: the agent runs on its OWN machine and fetches its
@@ -624,12 +675,8 @@ export function readAgentWorksourceChannel(name: string): boolean {
 // all -- the owner had to nudge him over a chat channel each time. For a pull
 // agent the row simply stays pending until HE closes it.
 export function readAgentPullDelivery(name: string): boolean {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    return config.pullDelivery === true
-  } catch { /* fall through */ }
-  return false
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  return config?.pullDelivery === true
 }
 
 // Persist the opt-in pullDelivery flag. `false` removes the key so the config
@@ -641,6 +688,7 @@ export function writeAgentPullDelivery(name: string, enabled: boolean): void {
   if (enabled) config.pullDelivery = true
   else delete config.pullDelivery
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 // Persist the opt-in worksourceChannel flag. `false` removes the key so the
@@ -652,6 +700,7 @@ export function writeAgentWorksourceChannel(name: string, enabled: boolean): voi
   if (enabled) config.worksourceChannel = true
   else delete config.worksourceChannel
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 export function writeAgentAuthMode(name: string, mode: AuthMode): void {
@@ -661,6 +710,7 @@ export function writeAgentAuthMode(name: string, mode: AuthMode): void {
   config = readJsonObjectForWrite(configPath)
   config.authMode = mode
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 export function writeAgentSecurityProfile(name: string, profileId: string): void {
@@ -669,6 +719,7 @@ export function writeAgentSecurityProfile(name: string, profileId: string): void
   config = readJsonObjectForWrite(configPath)
   config.securityProfile = profileId
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 // Optional per-agent named Claude subscription plan. Stores a registry id
@@ -679,12 +730,9 @@ export function writeAgentSecurityProfile(name: string, profileId: string): void
 // path. When unset (null), launch falls back to the raw claudeConfigDir and
 // then to Claude Code's default -- fully backwards-compatible.
 export function readAgentClaudePlan(name: string): string | null {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    const value = config.claudePlan
-    if (typeof value === 'string' && value.trim()) return value.trim()
-  } catch { /* fall through */ }
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  const value = config?.claudePlan
+  if (typeof value === 'string' && value.trim()) return value.trim()
   return null
 }
 
@@ -699,6 +747,7 @@ export function writeAgentClaudePlan(name: string, planId: string): void {
   if (trimmed) config.claudePlan = trimmed
   else delete config.claudePlan
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 // Sentinel filename. A subdirectory under agents/ that contains this empty
@@ -809,23 +858,19 @@ export const DEFAULT_VOICE_CONFIG: AgentVoiceConfig = {
 }
 
 export function readAgentVoiceConfig(name: string): AgentVoiceConfig {
-  const configPath = join(agentConfigRoot(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    const vc = (config.voice ?? {}) as Partial<AgentVoiceConfig>
-    return {
-      responseMode: VALID_RESPONSE_MODES.has(vc.responseMode as VoiceResponseMode)
-        ? (vc.responseMode as VoiceResponseMode)
-        : DEFAULT_VOICE_CONFIG.responseMode,
-      voiceModel: KNOWN_VOICE_MODELS.has(vc.voiceModel ?? '')
-        ? (vc.voiceModel as string)
-        : DEFAULT_VOICE_CONFIG.voiceModel,
-      // Only a real boolean counts; anything else (a string "true", a number)
-      // is treated as unset rather than guessed at.
-      ...(typeof vc.transcribeInbound === 'boolean' ? { transcribeInbound: vc.transcribeInbound } : {}),
-    }
-  } catch {
-    return { ...DEFAULT_VOICE_CONFIG }
+  const config = readAgentConfigRecordAt(join(agentConfigRoot(name), 'agent-config.json'))
+  if (!config) return { ...DEFAULT_VOICE_CONFIG }
+  const vc = (config.voice ?? {}) as Partial<AgentVoiceConfig>
+  return {
+    responseMode: VALID_RESPONSE_MODES.has(vc.responseMode as VoiceResponseMode)
+      ? (vc.responseMode as VoiceResponseMode)
+      : DEFAULT_VOICE_CONFIG.responseMode,
+    voiceModel: KNOWN_VOICE_MODELS.has(vc.voiceModel ?? '')
+      ? (vc.voiceModel as string)
+      : DEFAULT_VOICE_CONFIG.voiceModel,
+    // Only a real boolean counts; anything else (a string "true", a number)
+    // is treated as unset rather than guessed at.
+    ...(typeof vc.transcribeInbound === 'boolean' ? { transcribeInbound: vc.transcribeInbound } : {}),
   }
 }
 
@@ -850,6 +895,7 @@ export function writeAgentVoiceConfig(name: string, patch: Partial<AgentVoiceCon
     ...(transcribeInbound !== undefined ? { transcribeInbound } : {}),
   }
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 // ---- agent lookup ----------------------------------------------------------
@@ -894,11 +940,8 @@ function parsePersonaCapabilities(name: string): string[] {
 //   1. agent-config.json "capabilities" field (runtime override via PUT API)
 //   2. personas/<name>.md YAML frontmatter "capabilities:" line (auto-derived)
 export function readAgentCapabilities(name: string): string[] {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    if (Array.isArray(config.capabilities)) return config.capabilities
-  } catch { /* fall through to persona */ }
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  if (config && Array.isArray(config.capabilities)) return config.capabilities
   return parsePersonaCapabilities(name)
 }
 
@@ -940,13 +983,8 @@ export function sanitizeToolDenyList(raw: unknown): string[] {
 }
 
 export function readAgentToolDeny(name: string): string[] {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    return sanitizeToolDenyList(config.toolDeny)
-  } catch {
-    return []
-  }
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  return config ? sanitizeToolDenyList(config.toolDeny) : []
 }
 
 // ---- per-agent sudo opt-out ------------------------------------------------
@@ -1012,17 +1050,15 @@ export function writeAgentCapabilities(name: string, capabilities: string[]): vo
   config = readJsonObjectForWrite(configPath)
   config.capabilities = capabilities
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }
 
 // ---- per-agent custom provider ---------------------------------------------
 
 export function readAgentCustomProvider(name: string): string | null {
-  const configPath = join(agentDir(name), 'agent-config.json')
-  try {
-    const config = JSON.parse(readFileOr(configPath, '{}'))
-    const value = config.customProvider
-    if (typeof value === 'string' && value.trim()) return value.trim()
-  } catch { /* fall through */ }
+  const config = readAgentConfigRecordAt(join(agentDir(name), 'agent-config.json'))
+  const value = config?.customProvider
+  if (typeof value === 'string' && value.trim()) return value.trim()
   return null
 }
 
@@ -1033,4 +1069,5 @@ export function writeAgentCustomProvider(name: string, id: string | null): void 
   if (id && id.trim()) config.customProvider = id.trim()
   else delete config.customProvider
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  invalidateAgentConfigCache(configPath)
 }

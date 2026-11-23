@@ -777,8 +777,9 @@ function getAgentSummary(name: string): AgentSummary {
   const isMain = isMainChannelsAgent(name)
   const remote = readAgentRemoteConfig(name)
   const mainSessionName = isMain ? MAIN_CHANNELS_SESSION : agentSessionName(name)
+  const mainPane = isMain ? capturePane(MAIN_CHANNELS_SESSION) : null
   const runState: AgentRunState = isMain
-    ? (capturePane(MAIN_CHANNELS_SESSION) !== null ? 'running' : 'stopped')
+    ? (mainPane !== null ? 'running' : 'stopped')
     : agentRunStateCached(name, remote.host != null)
   const running = runState === 'running'
   const session = running ? mainSessionName : undefined
@@ -786,7 +787,7 @@ function getAgentSummary(name: string): AgentSummary {
 
   // Reauth badge: only meaningful for a running session (a stopped agent has
   // no pane to inspect). One capture-pane per running agent on the list poll.
-  const reauth = running ? detectReauthNeeded(capturePane(mainSessionName)) : { needsReauth: false }
+  const reauth = running ? detectReauthNeeded(isMain ? mainPane : capturePane(mainSessionName)) : { needsReauth: false }
 
   // The main agent runs in PROJECT_ROOT, not in agents/<name>; see
   // resolveTranscriptLocation.
@@ -878,7 +879,19 @@ function getAgentDetail(name: string): AgentDetail {
 }
 
 export function listAgentSummaries(): AgentSummary[] {
-  return withTmuxBatch(() => listAgentNames().map(getAgentSummary))
+  return withTmuxBatch(() => {
+    const names = listAgentNames()
+    const localSessions: string[] = []
+    for (const name of names) {
+      if (isMainChannelsAgent(name)) {
+        localSessions.push(MAIN_CHANNELS_SESSION)
+      } else if (readAgentRemoteConfig(name).host == null && agentRunStateCached(name, false) === 'running') {
+        localSessions.push(agentSessionName(name))
+      }
+    }
+    if (localSessions.length >= 2) prefetchPaneCaptures(localSessions)
+    return names.map(getAgentSummary)
+  })
 }
 
 // Max inter-agent messages a single main-agent inbox drain returns. The rest

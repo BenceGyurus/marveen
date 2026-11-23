@@ -72,7 +72,7 @@ describe('the launcher binding', () => {
   it('reads the flag from agent-config.json as a strict boolean', () => {
     const CFG = readFileSync(join(__dirname, '../web/agent-config.ts'), 'utf-8')
     const fn = CFG.slice(CFG.indexOf('export function readAgentStateObserver('))
-    expect(fn.slice(0, 400)).toMatch(/config\.stateObserver === true/)
+    expect(fn.slice(0, 400)).toMatch(/config\?\.stateObserver === true/)
   })
 
   it('ships the mod folder the launcher points at', () => {
