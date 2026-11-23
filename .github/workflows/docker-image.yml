@@ -11,10 +11,10 @@ name: Docker image
 
 on:
   pull_request:
-    paths: ['Dockerfile', '.dockerignore', 'docker/**', 'docker-compose.yml', 'package.json', 'package-lock.json', 'tsconfig.json', 'src/**', 'web/**', 'scripts/build-web-assets.mjs', 'scripts/write-built-commit.cjs', '.github/workflows/docker-image.yml']
+    paths: ['Dockerfile', '.dockerignore', 'docker/**', 'docker-compose.yml', 'package.json', 'package-lock.json', 'tsconfig.json', 'src/**', 'web/**', 'vendor/**', 'scripts/build-web-assets.mjs', 'scripts/write-built-commit.cjs', '.github/workflows/docker-image.yml']
   push:
     branches: [develop, main]
-    paths: ['Dockerfile', '.dockerignore', 'docker/**', 'docker-compose.yml', 'package.json', 'package-lock.json', 'tsconfig.json', 'src/**', 'web/**', 'scripts/build-web-assets.mjs', 'scripts/write-built-commit.cjs', '.github/workflows/docker-image.yml']
+    paths: ['Dockerfile', '.dockerignore', 'docker/**', 'docker-compose.yml', 'package.json', 'package-lock.json', 'tsconfig.json', 'src/**', 'web/**', 'vendor/**', 'scripts/build-web-assets.mjs', 'scripts/write-built-commit.cjs', '.github/workflows/docker-image.yml']
     tags: ['v*']
   workflow_dispatch:
 

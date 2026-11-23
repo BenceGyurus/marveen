@@ -75,11 +75,14 @@ RUN usermod -l marveen -d /home/marveen -m node && groupmod -n marveen node \
 COPY --from=build --chown=root:root /src /opt/marveen-image
 COPY --chown=root:root docker/ /opt/marveen-docker/
 # The build manifest: every code file and its hash. code-sync.sh compares it before and verifies the copy after.
+# Filter a+rX to paths whose modes change to avoid an overlay copy-up for each already readable file.
 RUN cd /opt/marveen-image && find . -type f -o -type l | LC_ALL=C sort | while IFS= read -r f; do \
       if [ -L "$f" ]; then printf 'L %s %s\n' "$(readlink "$f")" "$f"; else printf 'F %s %s\n' "$(sha256sum < "$f" | cut -d' ' -f1)" "$f"; fi; \
     done > /opt/marveen-docker/image.manifest \
     && sha256sum /opt/marveen-docker/image.manifest | cut -d' ' -f1 > /opt/marveen-docker/image.id \
-    && chmod -R a+rX /opt/marveen-image /opt/marveen-docker && chmod 0755 /opt/marveen-docker/*.sh
+    && find /opt/marveen-image /opt/marveen-docker ! -type l \( ! -perm -0444 \
+         -o \( \( -type d -o -perm /0111 \) ! -perm -0111 \) \) -exec chmod a+rX {} + \
+    && chmod 0755 /opt/marveen-docker/*.sh
 
 USER marveen
 ENV HOME=/home/marveen \
