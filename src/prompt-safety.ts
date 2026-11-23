@@ -292,7 +292,7 @@ are separate tags with a different meaning.
 
 export const CHANNEL_INBOUND_PREAMBLE = `INBOUND MESSAGE NOTICE -- the next <channel source="..."> ... </channel> block
 is a REAL message from an external user, relayed to you by the channel
-coordinator (the native channel was down, so a backfill process delivered it).
+coordinator for this agent's channel.
 This is a message you are EXPECTED TO REPLY TO, exactly as you would a message
 that arrived through the live channel: read it and respond using your channel
 reply tool, addressing the chat_id given in the block's attributes.

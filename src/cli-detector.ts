@@ -168,7 +168,7 @@ export function detectAvailableClis(): Record<CliType, CliToolInfo> {
  * pre-trust the workspace in the target CLI provider's local config, and synchronize MCP servers
  * (including Headroom `headroom mcp serve` when available).
  */
-export function prepareWorkspaceForCli(dir: string, cliType: CliType): void {
+export function prepareWorkspaceForCli(dir: string, cliType: CliType, opts?: { telegramReplyScript?: string }): void {
   const provider = getCliProvider(cliType)
   try {
     const isRegularFile = (p: string): boolean => {
@@ -197,7 +197,7 @@ export function prepareWorkspaceForCli(dir: string, cliType: CliType): void {
   } catch { /* best-effort instruction symlink */ }
 
   provider.stampWorkspaceTrust(dir)
-  syncCliMcpConfig(cliType, join(dir, '.mcp.json'))
+  syncCliMcpConfig(cliType, join(dir, '.mcp.json'), opts)
 }
 
 /**
