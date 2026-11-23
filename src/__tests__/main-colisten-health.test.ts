@@ -205,7 +205,7 @@ describe('runColistenCheck: live primary + dead co-listen = restart and alert', 
 describe('the binding in channel-monitor (source)', () => {
   const src = readFileSync(join(__dirname, '../web/channel-monitor.ts'), 'utf-8')
   it('runs only in the primary-ALIVE branch of the main target, right after the keepalive check', () => {
-    expect(src).toMatch(/checkMainKeepaliveStaleness\(\)\n(?:\s*\/\/[^\n]*\n)*\s*await checkMainColistenChannels\(claudePid\)/)
+    expect(src).toMatch(/checkMainKeepaliveStaleness\(\{ claudePid, providerType: t\.provider \}\)\n(?:\s*\/\/[^\n]*\n)*\s*await checkMainColistenChannels\(claudePid\)/)
   })
   it('probes each co-listen provider under the main claude, restarts with the conversation kept, alerts through sendAlert', () => {
     const fn = src.slice(src.indexOf('async function checkMainColistenChannels'), src.indexOf('function handleMarveenUp'))
