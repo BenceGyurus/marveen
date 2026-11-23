@@ -116,14 +116,14 @@ function buildTimeline(file: string): Entry[] {
 
     if (type === 'user') {
       const content = msg['content']
-      const asText = typeof content === 'string' ? content : ''
-      // Only surface real inbound channel messages; skip tool results,
-      // system-reminders and slash-command echoes.
-      if (asText.includes('<channel')) {
-        let m: RegExpExecArray | null
-        CHANNEL_RE.lastIndex = 0
-        while ((m = CHANNEL_RE.exec(asText)) !== null) {
-          const inner = m[1].trim()
+      // Claude transcripts can store channel input as a string or text blocks.
+      // Tool results and slash-command echoes are not incoming chat messages.
+      const texts = typeof content === 'string' ? [content] : Array.isArray(content)
+        ? content.flatMap(block => block?.type === 'text' && typeof block.text === 'string' ? [block.text] : [])
+        : []
+      for (const text of texts) {
+        for (const match of text.matchAll(CHANNEL_RE)) {
+          const inner = match[1].trim()
           if (inner) entries.push({ ts, kind: 'in', text: clip(inner) })
         }
       }

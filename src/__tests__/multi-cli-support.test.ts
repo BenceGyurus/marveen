@@ -483,9 +483,9 @@ describe('headroom integration: launcher, MCP config sync, and sandboxed install
       expect(codexToml).not.toContain('secret-tok')
       expect(statSync(join(tmp, '.codex', 'config.toml')).mode & 0o777).toBe(0o600)
 
-      // 3. Antigravity ~/.gemini/antigravity/mcp_config.json
+      // 3. Antigravity ~/.gemini/config/mcp_config.json
       expect(syncCliMcpConfig('agy', join(codexWs, '.mcp.json'), { env, homeDir: tmp })).toBe(true)
-      const agyMcp = JSON.parse(readFileSync(join(tmp, '.gemini', 'antigravity', 'mcp_config.json'), 'utf-8'))
+      const agyMcp = JSON.parse(readFileSync(join(tmp, '.gemini', 'config', 'mcp_config.json'), 'utf-8'))
       expect(agyMcp.mcpServers.headroom).toEqual({ command: fakeHr, args: ['mcp', 'serve'] })
       expect(agyMcp.mcpServers.memoryTool.env).toEqual({ MEMORY_DIR: '/tmp/mem' })
 
@@ -632,8 +632,16 @@ describe('headroom integration: launcher, MCP config sync, and sandboxed install
         expect(toml).toContain('channel-reply-mcp.mjs')
         expect(toml).not.toContain('TELEGRAM_BOT_TOKEN')
 
+        const agyPath = join(fakeHome, '.gemini', 'config', 'mcp_config.json')
+        mkdirSync(dirname(agyPath), { recursive: true })
+        writeFileSync(agyPath, '{ invalid JSON')
+        expect(syncCliMcpConfig('agy', mcpJsonPath, { homeDir: fakeHome })).toBe(false)
+        expect(readFileSync(agyPath, 'utf-8')).toBe('{ invalid JSON')
+        writeFileSync(agyPath, JSON.stringify({ mcpServers: { existing: { command: 'existing-mcp' } } }))
         expect(syncCliMcpConfig('agy', mcpJsonPath, { homeDir: fakeHome })).toBe(true)
-        const agyCfg = JSON.parse(readFileSync(join(fakeHome, '.gemini', 'antigravity', 'mcp_config.json'), 'utf-8'))
+        const agyCfg = JSON.parse(readFileSync(agyPath, 'utf-8'))
+        expect(agyCfg.mcpServers.existing).toEqual({ command: 'existing-mcp' })
+        expect(syncCliMcpConfig('agy', mcpJsonPath, { homeDir: fakeHome })).toBe(false)
         expect(agyCfg.mcpServers.marveen_telegram.args).toContain(join(fakeWorkspace, 'scripts', 'channel-reply-mcp.mjs'))
         expect(JSON.stringify(agyCfg)).not.toContain('TELEGRAM_BOT_TOKEN')
       } finally {

@@ -850,7 +850,8 @@ export async function runMessageRouterTick(): Promise<void> {
         logger.info({ agent }, 'message-router: delivery hold released')
       }
     }
-    const mainAgentUsesPull = resolveConfiguredMainCliType(PROJECT_ROOT) === 'claude'
+    const mainCli = resolveConfiguredMainCliType(PROJECT_ROOT)
+    const mainAgentUsesPull = mainCli === 'claude'
     const pending = selectTickWindow(localPending, MAX_MESSAGES_PER_TICK, MAIN_AGENT_ID, { mainAgentPull: mainAgentUsesPull })
     // ---- update absent/present tracking for all receivers in this tick ----
     // Rebuild the stuck-detector's view of which agents are absent RIGHT NOW.
@@ -1107,7 +1108,10 @@ export async function runMessageRouterTick(): Promise<void> {
       // Card 3b00596e (review R1): a full check decides this recipient afresh. Only its final
       // "busy, will retry" re-memoizes it; the janitor history is kept in janitorTriedThisTick.
       busyThisTick.delete(msg.to_agent)
-      const paneNotReady = !worksourceServing && !(await isSessionReadyForPrompt(session, host))
+      let blockedBy: string | undefined
+      const paneNotReady = !worksourceServing && !(await (isMainAgent && !routerLoggedMisses.has(msg.id)
+        ? isSessionReadyForPrompt(session, host, { onBlocked: reason => { blockedBy = reason } })
+        : isSessionReadyForPrompt(session, host)))
       // UNBLOCKS925: the one named case besides STOP/urgent that may reach a busy pane: a row the main agent
       // flagged affects_current_work = 'unblocks'. It takes the urgent path below (same pane-hold check, same
       // last look before the first key), but sends a SHORT notice instead of the full text.
@@ -1221,7 +1225,9 @@ export async function runMessageRouterTick(): Promise<void> {
           continue // input cleared; deliver on the next tick
         }
         if (!routerLoggedMisses.has(msg.id)) {
-          logger.warn({ id: msg.id, to: msg.to_agent, session }, 'Agent message target session busy, will retry')
+          logger.warn({
+            id: msg.id, to: msg.to_agent, session, ...(isMainAgent ? { cli: mainCli, blockedBy } : {}),
+          }, 'Agent message target session busy, will retry')
           routerLoggedMisses.add(msg.id)
         }
         const janitorTried = janitorTriedThisTick.has(msg.to_agent) || ageMs > JANITOR_PARKED_MIN_AGE_MS
@@ -1405,7 +1411,8 @@ export async function runMessageRouterTick(): Promise<void> {
             : collectBatchMates(pending, msg, now, agentSessionCache)
           if (mates.items.length > 0) {
             const text = composeBatchInjection([{ prefix, wrapped }, ...mates.items], mates.remaining)
-            await sendPromptToSession(session, text, host)
+            const outcome = await sendPromptToSession(session, text, host)
+            if (outcome !== 'sent') continue
             // The head row is marked delivered by the shared code below; the
             // mates are marked here and skipped by the loop via
             // batchedMsgIdsThisTick, exactly like the reconnect batch.
@@ -1442,9 +1449,11 @@ export async function runMessageRouterTick(): Promise<void> {
                 if (hold) noticeUrgentHold(msg, session, hold, urgentLabel, now, typed)
                 continue
               }
+              if (outcome !== 'sent') continue
               logger.info({ id: msg.id, to: msg.to_agent, urgent: msg.urgent === 1, unblock: unblockPass }, 'message-router: urgent, STOP or unblock row sent without waiting for an idle pane')
             } else {
-              await sendPromptToSession(session, prefix + wrapped, host)
+              const outcome = await sendPromptToSession(session, prefix + wrapped, host)
+              if (outcome !== 'sent') continue
             }
           }
         }

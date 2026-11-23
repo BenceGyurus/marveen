@@ -115,10 +115,6 @@ export function inNative409Cooldown(confirmedUpUntilMs: number, nowMs: number): 
 
 // ---- token --------------------------------------------------------------
 
-// Read the bot token from the coordinator's own STATE_DIR/.env (chmod 0600),
-// Resolve the bot token across process env, coordinator STATE_DIR/.env,
-// TELEGRAM_STATE_DIR/.env, install-scoped/local channel state dirs, ~/.claude/channels/telegram/.env,
-// and PROJECT_ROOT/.env (needed on Linux and non-Claude setups). NEVER log the token.
 function readEnvKeyFromFile(filePath: string, key: string): string | null {
   try {
     const parsed = parseEnvContent(readFileSync(filePath, 'utf-8'), [key])
@@ -159,10 +155,18 @@ export function resolveCoordinatorTelegramToken(opts: {
   const stateDir = opts.stateDir ?? STATE_DIR
   const projectRoot = opts.projectRoot ?? PROJECT_ROOT
   const homeDir = opts.homeDir ?? homedir()
+  const legacyPluginDir = join(homeDir, '.claude', 'channels', 'telegram')
+  const installationDirs = candidateTelegramStateDirs({ projectRoot, homeDir, env })
+  // The home directory is appended by the default search, but may also have
+  // been explicitly selected as TELEGRAM_STATE_DIR at the front of the list.
+  if (installationDirs.at(-1) === legacyPluginDir) installationDirs.pop()
+  // Older launchd installers saved a copy in the coordinator state. After
+  // changing bots that copy can still be valid for the previous bot.
   const candidates = [
-    join(stateDir, '.env'),
-    ...candidateTelegramStateDirs({ projectRoot, homeDir, env }).map((d) => join(d, '.env')),
+    ...installationDirs.map(d => join(d, '.env')),
     join(projectRoot, '.env'),
+    join(stateDir, '.env'),
+    join(legacyPluginDir, '.env'),
   ]
   const uniquePaths = [...new Set(candidates)]
   for (const envPath of uniquePaths) {

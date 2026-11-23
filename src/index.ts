@@ -12,7 +12,8 @@ import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { runLsof } from './lsof.js'
 import type { Server as HttpServer } from 'node:http'
-import { PROJECT_ROOT, STORE_DIR, PID_FILENAME, WEB_PORT, MAIN_AGENT_ID, RESPAWN_ENABLED, HEARTBEAT_AGENT_ENABLED } from './config.js'
+import { PROJECT_ROOT, STORE_DIR, PID_FILENAME, WEB_PORT, MAIN_AGENT_ID, CHANNEL_PROVIDER, RESPAWN_ENABLED, HEARTBEAT_AGENT_ENABLED } from './config.js'
+import { resolveConfiguredMainCliType } from './cli-detector.js'
 import { getEffectiveSettingValue } from './settings-store.js'
 import { parseStoreWatchExclude } from './config-registry.js'
 import { ownerAlertChatOverride, resolveOwnerChatId } from './owner-chat.js'
@@ -640,7 +641,11 @@ async function main(): Promise<void> {
   webServer = startWebServer(WEB_PORT)
 
   logger.info(`Marveen fut! Dashboard: http://localhost:${WEB_PORT}`)
-  logger.info('Telegram kommunikacio: Claude Code Channels kezeli')
+  const mainCli = resolveConfiguredMainCliType(PROJECT_ROOT)
+  const telegramInbound = CHANNEL_PROVIDER === 'telegram'
+    ? (mainCli === 'claude' ? 'claude-channels' : 'channel-coordinator')
+    : undefined
+  logger.info({ provider: CHANNEL_PROVIDER, mainCli, telegramInbound }, 'Channel runtime configuration')
 }
 
 main().catch((err) => {

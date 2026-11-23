@@ -24,7 +24,7 @@ const mockMarkFailed = vi.fn((..._a: unknown[]) => true)
 const mockSessionExistsOnHost = vi.fn((..._a: unknown[]) => true)
 const mockIsReady = vi.fn(() => false)
 const mockClearModal = vi.fn(() => false)
-const mockSendPrompt = vi.fn()
+const mockSendPrompt = vi.fn(async () => 'sent' as const)
 
 vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },

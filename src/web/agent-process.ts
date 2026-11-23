@@ -5359,34 +5359,34 @@ export async function isSessionReadyForPrompt(
   // A caller that polls the same session every few seconds (the reconcile's
   // readiness gap) asks for 'debug' so a saturated session does not write a
   // warn line per poll. Every other caller keeps 'warn'.
-  opts: { saturationLog?: 'warn' | 'debug' } = {},
+  opts: { saturationLog?: 'warn' | 'debug'; onBlocked?: (reason: string) => void } = {},
 ): Promise<boolean> {
   if (!host && isHeadlessSession(session)) return true
   const saturationLog = opts.saturationLog ?? 'warn'
-  // Dim-ghost tolerant idle read: CC >=2.1.202 paints a dim placeholder into
-  // the empty input box, which a plain capture reads as parked text. Only when
-  // the plain view says 'typing' do we pay for the second (-e, dim-stripped)
-  // capture to decide whether anything REAL is parked (see
-  // idleConsideringDimGhost / captureParkedInputView).
-  const idleOrGhost = async (plain: string): Promise<boolean> =>
-    idleConsideringDimGhost(plain, detectPaneState(plain) === 'typing' ? await captureParkedInputViewAsync(session, host) : null)
-  const first = await capturePaneAsync(session, host)
-  if (first == null) return false
-  if (saturationRefusesDispatch(first, session)) {
-    logger[saturationLog]({ session }, 'dispatch: refusing prompt — session shows context saturation (100% context)')
+  const checkCapture = async (): Promise<boolean> => {
+    const pane = await capturePaneAsync(session, host)
+    if (pane == null) {
+      opts.onBlocked?.('capture-unavailable')
+      return false
+    }
+    if (saturationRefusesDispatch(pane, session)) {
+      logger[saturationLog]({ session }, 'dispatch: refusing prompt — session shows context saturation (100% context)')
+      opts.onBlocked?.('context-saturated')
+      return false
+    }
+    const state = detectPaneState(pane)
+    // Claude may render an empty input as a dim suggestion. Read the ANSI view
+    // only when the plain capture resembles typed input.
+    if (idleConsideringDimGhost(pane, state === 'typing' ? await captureParkedInputViewAsync(session, host) : null)) return true
+    if (opts.onBlocked) {
+      opts.onBlocked(detectsFirstRunGate(pane) ?? (detectsBlockingMenu(pane) ? 'blocking-menu' : state))
+    }
     return false
   }
-  if (!(await idleOrGhost(first))) return false
 
+  if (!(await checkCapture())) return false
   await delay(PANE_READY_CONFIRM_DELAY_MS)
-
-  const second = await capturePaneAsync(session, host)
-  if (second == null) return false
-  if (saturationRefusesDispatch(second, session)) {
-    logger[saturationLog]({ session }, 'dispatch: refusing prompt — session shows context saturation (100% context)')
-    return false
-  }
-  return idleOrGhost(second)
+  return checkCapture()
 }
 
 // How long to wait between the two parked-input captures when deciding whether
