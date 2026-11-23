@@ -372,7 +372,7 @@ function readSafeStdioMcpServers(mcpJsonPath?: string): Record<string, SafeStdio
 export function syncCliMcpConfig(
   cliType: CliType,
   mcpJsonPath?: string,
-  opts: { homeDir?: string; env?: NodeJS.ProcessEnv } = {},
+  opts: { homeDir?: string; env?: NodeJS.ProcessEnv; telegramReplyScript?: string } = {},
 ): boolean {
   const env = opts.env ?? process.env
   if (env.VITEST && !opts.homeDir && !env.MARVEEN_HEADROOM_BIN) return false
@@ -410,7 +410,7 @@ export function syncCliMcpConfig(
       servers.headroom = { command: headroomBin, args: ['mcp', 'serve'] }
     }
     const baseDir = mcpJsonPath ? dirname(mcpJsonPath) : ''
-    const replyMcpScript = baseDir ? join(baseDir, 'scripts', 'channel-reply-mcp.mjs') : ''
+    const replyMcpScript = opts.telegramReplyScript ?? (baseDir ? join(baseDir, 'scripts', 'channel-reply-mcp.mjs') : '')
     if (replyMcpScript && existsSync(replyMcpScript) && !lstatSync(replyMcpScript).isSymbolicLink()) {
       servers.marveen_telegram = { command: process.execPath, args: [replyMcpScript] }
     }

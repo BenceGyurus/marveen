@@ -38,6 +38,7 @@ import { startInboundProber } from './web/inbound-probe.js'
 import { startChannelHealthMonitor } from './web/channel-health-monitor.js'
 import { startChannelIntakeMonitor } from './web/channel-intake-monitor.js'
 import { startTelegramInboundReplay } from './web/telegram-inbound-replay.js'
+import { startHeadlessTelegramPolling } from './web/headless-telegram.js'
 import { startTeamsCredentialMonitor } from './web/teams-credential-monitor.js'
 import { startStuckInputWatcher } from './web/stuck-input-watcher.js'
 import { startMessageSeenSweep } from './web/message-seen-sweep.js'
@@ -691,6 +692,7 @@ export function startWebServer(port = 3420): http.Server {
   // first seconds after every restart) is dropped silently; this re-delivers it from the plugin's own inbound log.
   const stopTelegramInboundReplay = servicesOff ? undefined : startTelegramInboundReplay()
   if (!servicesOff) logger.info('Telegram inbound replay started (60s poll, 90s offset)')
+  const stopHeadlessTelegramPolling = servicesOff ? undefined : startHeadlessTelegramPolling()
   const teamsCredentialInterval = servicesOff ? undefined : startTeamsCredentialMonitor()
   if (!servicesOff) logger.info('Teams credential monitor started (daily, 5min offset)')
 
@@ -1007,6 +1009,7 @@ setInterval(() => { try { sweepExpiredDesktopLock() } catch { /* never kill the 
     clearInterval(channelHealthInterval)
     if (channelIntakeInterval) clearInterval(channelIntakeInterval)
     if (stopTelegramInboundReplay) stopTelegramInboundReplay()
+    stopHeadlessTelegramPolling?.()
     if (teamsCredentialInterval) clearInterval(teamsCredentialInterval)
     if (costsSyncInterval) clearInterval(costsSyncInterval)
     clearInterval(stuckInputInterval)

@@ -17,6 +17,7 @@ export interface HeadlessAgentConfig {
   dir: string
   skipPermissions: boolean
   env?: Record<string, string>
+  telegramStateDir?: string
   fresh?: boolean
 }
 
@@ -29,6 +30,7 @@ export interface HeadlessAgentState {
   dir: string
   skipPermissions: boolean
   env: Record<string, string>
+  telegramStateDir?: string
   startedAt: number
   lastTurnAt: number | null
   turnStartedAt: number | null
@@ -101,6 +103,8 @@ export function buildHeadlessChildEnv(
   const env: NodeJS.ProcessEnv = { ...baseEnv, ...overrides }
   delete env.CLAUDE_CODE_OAUTH_TOKEN
   delete env.ANTHROPIC_API_KEY
+  delete env.TELEGRAM_BOT_TOKEN
+  if (!overrides.TELEGRAM_STATE_DIR) delete env.TELEGRAM_STATE_DIR
   env.NO_COLOR = '1'
   env.TERM = 'dumb'
   env.CI = '1'
@@ -126,11 +130,16 @@ export function buildHeadlessTurnSpec(opts: {
   skipPermissions: boolean
   threadId: string | null
   hasPriorTurn: boolean
+  telegramStateDir?: string
 }): HeadlessTurnSpec {
   const safeModel = opts.cleanModel && SAFE_MODEL_ID_RX.test(opts.cleanModel) ? opts.cleanModel : ''
 
   if (opts.cliType === 'codex') {
-    const args: string[] = ['exec']
+    const args: string[] = []
+    if (opts.telegramStateDir) {
+      args.push('-c', 'mcp_servers.marveen_telegram.env_vars=["MARVEEN_HEADLESS_TELEGRAM","TELEGRAM_STATE_DIR"]')
+    }
+    args.push('exec')
     if (opts.threadId) {
       args.push('resume', opts.threadId)
     } else if (opts.hasPriorTurn) {
@@ -215,7 +224,12 @@ export function registerHeadlessAgent(cfg: HeadlessAgentConfig): HeadlessAgentSt
     cleanModel,
     dir: cfg.dir,
     skipPermissions: cfg.skipPermissions,
-    env: { ...(cfg.env ?? {}) },
+    env: {
+      ...cfg.env,
+      MARVEEN_HEADLESS_TELEGRAM: '1',
+      ...(cfg.telegramStateDir ? { TELEGRAM_STATE_DIR: cfg.telegramStateDir } : {}),
+    },
+    telegramStateDir: cfg.telegramStateDir,
     startedAt: Math.floor(Date.now() / 1000),
     lastTurnAt: null,
     turnStartedAt: null,
@@ -258,6 +272,10 @@ export function unregisterHeadlessAgent(name: string): boolean {
 export function isHeadlessAgent(name: string): boolean {
   const st = byName.get(name)
   return Boolean(st && st.status !== 'stopped')
+}
+
+export function listHeadlessTelegramAgents(): HeadlessAgentState[] {
+  return [...byName.values()].filter(state => state.telegramStateDir && state.status !== 'stopped')
 }
 
 export function isHeadlessSession(session: string): boolean {
@@ -345,6 +363,7 @@ export async function runOneHeadlessTurn(
     skipPermissions: state.skipPermissions,
     threadId: state.threadId,
     hasPriorTurn: state.hasPriorTurn,
+    telegramStateDir: state.telegramStateDir,
   })
 
   const timeoutMs = opts.timeoutMs ?? (Number(process.env.MARVEEN_HEADLESS_TURN_TIMEOUT_MS) || DEFAULT_TURN_TIMEOUT_MS)

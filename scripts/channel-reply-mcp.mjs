@@ -28,6 +28,7 @@ function isRegularFile(p) {
 
 function candidateStateDirs(projectRoot) {
   const explicit = (process.env.TELEGRAM_STATE_DIR || '').trim()
+  if (process.env.MARVEEN_HEADLESS_TELEGRAM === '1') return explicit ? [explicit] : []
   const home = homedir()
   const out = []
   if (explicit) out.push(explicit)
@@ -60,6 +61,7 @@ function readEnvKeyFromFile(filePath, key) {
 }
 
 function resolveTelegramCredentials(projectRoot = DEFAULT_PROJECT_ROOT) {
+  const scoped = process.env.MARVEEN_HEADLESS_TELEGRAM === '1'
   const dirs = candidateStateDirs(projectRoot)
   let token = null
   let allowFrom = new Set()
@@ -77,19 +79,22 @@ function resolveTelegramCredentials(projectRoot = DEFAULT_PROJECT_ROOT) {
           const s = String(item).trim()
           if (s) allowFrom.add(s)
         }
+        if (scoped && parsed?.groups && typeof parsed.groups === 'object') {
+          for (const chatId of Object.keys(parsed.groups)) allowFrom.add(chatId)
+        }
       } catch { /* ignore */ }
     }
   }
 
-  if (!token) {
+  if (!token && !scoped) {
     token = readEnvKeyFromFile(join(projectRoot, '.env'), 'TELEGRAM_BOT_TOKEN')
   }
-  if (allowFrom.size === 0) {
+  if (allowFrom.size === 0 && !scoped) {
     const allowedChat = readEnvKeyFromFile(join(projectRoot, '.env'), 'ALLOWED_CHAT_ID')
     if (allowedChat && allowedChat !== '0') allowFrom.add(allowedChat)
   }
 
-  return { token, allowFrom }
+  return { token, allowFrom, scoped }
 }
 
 function splitChunks(text, limit = TELEGRAM_MAX_CHUNK) {
@@ -114,19 +119,19 @@ async function sendTelegramReply(args) {
     ? Number(replyToRaw)
     : undefined
 
-  const { token, allowFrom } = resolveTelegramCredentials()
+  const { token, allowFrom, scoped } = resolveTelegramCredentials()
   const chatId = rawChatId || (allowFrom.size === 1 ? Array.from(allowFrom)[0] : '')
   if (!chatId || !SAFE_CHAT_ID_RE.test(chatId)) {
     throw new Error('Invalid or missing chat_id')
   }
-  if (allowFrom.size > 0 && !allowFrom.has(chatId)) {
+  if (!token) {
+    throw new Error('TELEGRAM_BOT_TOKEN not configured on host')
+  }
+  if ((scoped || allowFrom.size > 0) && !allowFrom.has(chatId)) {
     throw new Error(`chat_id ${chatId} is not in allowFrom`)
   }
   if (!text.trim()) {
     throw new Error('Empty message text')
-  }
-  if (!token) {
-    throw new Error('TELEGRAM_BOT_TOKEN not configured on host')
   }
 
   const chunks = splitChunks(text)

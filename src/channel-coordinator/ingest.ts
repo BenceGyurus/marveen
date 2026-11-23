@@ -176,12 +176,27 @@ export function insertIncomingEvent(
 // inbound message -- while still treating the message body as untrusted user
 // data. (External callers cannot forge this id via /api/messages: a 403 guard
 // rejects it; only this in-process direct DB insert is trusted.)
-export function createHandoffMessage(content: string): number {
+export function createHandoffMessage(content: string, target = MAIN_AGENT_ID): number {
   const now = Math.floor(Date.now() / 1000)
   const info = requireDb().prepare(
     'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(COORDINATOR_AGENT_ID, MAIN_AGENT_ID, content, 'pending', now)
+  ).run(COORDINATOR_AGENT_ID, target, content, 'pending', now)
   return Number(info.lastInsertRowid)
+}
+
+export function commitIncomingBatch(
+  source: string,
+  offset: number,
+  target: string,
+  events: { event: Parameters<typeof insertIncomingEvent>[1]; content: string }[],
+): void {
+  requireDb().transaction(() => {
+    for (const { event, content } of events) {
+      const { eventId } = insertIncomingEvent(source, event)
+      if (eventId != null) markEventDelivered(eventId, createHandoffMessage(content, target))
+    }
+    setOffset(source, offset)
+  })()
 }
 
 export function markEventDelivered(eventId: number, agentMessageId: number): void {

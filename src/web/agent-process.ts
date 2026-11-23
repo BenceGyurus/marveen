@@ -2720,7 +2720,14 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     const model = isCustom ? rawModel : resolveOpenRouterModel(rawModel)
     const cliType = isCustom ? 'claude' : getCliTypeForModel(model)
     const cleanModel = stripCliModelPrefix(model)
-    prepareWorkspaceForCli(dir, cliType)
+    const useHeadless = !isCustom && shouldUseHeadlessMode(cliType)
+    const telegramStateDir = useHeadless &&
+      ((hasChannel && agentProvider === 'telegram') || extraLaunch.providers.includes('telegram'))
+      ? channelStateDir('telegram', dir)
+      : undefined
+    prepareWorkspaceForCli(dir, cliType, telegramStateDir
+      ? { telegramReplyScript: join(PROJECT_ROOT, 'scripts', 'channel-reply-mcp.mjs') }
+      : undefined)
     const authMode = readAgentAuthMode(name)
     const isClaude = !isCustom && model.startsWith('claude-')
     // 2fb86ef2 backstop: the decision above already refused a custom-provider or
@@ -3479,7 +3486,6 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
     // silently started it as the router's user -- measured 2026-08-19: the start
     // reported ok, no session existed under the agent's user, and the first
     // capture-pane failed against the router's empty tmux server.
-    const useHeadless = !isCustom && shouldUseHeadlessMode(cliType)
     if (useHeadless && (cliType === 'codex' || cliType === 'agy')) {
       const headlessEnv: Record<string, string> = {
         MARVEEN_AGENT_ID: name,
@@ -3496,6 +3502,7 @@ export async function startAgentProcess(name: string, opts: StartOpts = {}): Pro
         dir,
         skipPermissions: Boolean(skipFlag),
         env: headlessEnv,
+        telegramStateDir,
         fresh: opts.fresh,
       })
       logger.info({ name, session, cliType, model }, 'Headless agent started (no tmux)')

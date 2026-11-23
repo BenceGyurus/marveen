@@ -2320,7 +2320,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       const pending = access.pending || {}
       const entry = pending[code.trim()]
 
-      if (!entry) { json(res, { error: 'Invalid or expired code' }, 404); return true }
+      if (!entry || (typeof entry.expiresAt === 'number' && entry.expiresAt <= Date.now())) {
+        json(res, { error: 'Invalid or expired code' }, 404)
+        return true
+      }
 
       if (!access.allowFrom) access.allowFrom = []
       if (!access.allowFrom.includes(entry.senderId)) {
