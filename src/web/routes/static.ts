@@ -5,10 +5,10 @@ import { PROJECT_ROOT, BRAND_NAME } from '../../config.js'
 import type { RouteContext } from './types.js'
 
 const PROD_WEB_DIR = join(PROJECT_ROOT, 'web')
-const PROD_DIST_WEB_DIR = join(PROJECT_ROOT, 'dist', 'web')
+const PROD_DIST_WEB_DIR = join(PROJECT_ROOT, 'dist', 'web-assets')
 
 /**
- * Resolve a static web asset, preferring its pre-minified `dist/web/` artifact
+ * Resolve a static web asset, preferring its pre-minified `dist/web-assets/` artifact
  * when serving the project's own `web/` dir and the built file is up to date.
  */
 export function resolveWebAssetPath(webDir: string, relPath: string): string {
@@ -20,7 +20,7 @@ export function resolveWebAssetPath(webDir: string, relPath: string): string {
     const srcStat = statSync(srcPath)
     if (builtStat.mtimeMs >= srcStat.mtimeMs) return builtPath
   } catch {
-    /* fall back to source asset when dist/web/ is absent or older */
+    /* fall back to source asset when dist/web-assets/ is absent or older */
   }
   return srcPath
 }

@@ -98,6 +98,8 @@ describe('GitHub Actions CI/CD and Dependabot security contracts', () => {
     const testRuns = (testDoc.jobs.test.steps as any[]).map(s => String(s.run ?? '')).join('\n')
     expect(testRuns).toContain('npm run syntax-check')
     expect(testRuns).toContain('npm run build')
+    expect(testRuns).toContain('node --check "dist/web-assets/$asset"')
+    expect(testRuns).toContain("import './dist/web.js'")
     expect(testRuns).toContain('bash scripts/check-lockfile-canonical.sh')
     const browserRuns = (testDoc.jobs['browser-verify'].steps as any[]).map(s => String(s.run ?? '')).join('\n')
     expect(browserRuns).toContain('npm run browser-verify')

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const SRC_WEB = join(ROOT, 'web')
-const DIST_WEB = join(ROOT, 'dist', 'web')
+const DIST_WEB = join(ROOT, 'dist', 'web-assets')
 
 const ASSETS = [
   { rel: 'app.js', loader: 'js' },

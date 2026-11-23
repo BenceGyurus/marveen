@@ -82,8 +82,10 @@ jobs:
       - name: Check built JavaScript syntax
         run: |
           for asset in app.js lang/hu.js lang/en.js operator.js video-review.js; do
-            node --check "dist/web/$asset"
+            node --check "dist/web-assets/$asset"
           done
+      - name: Load the compiled dashboard module
+        run: node --input-type=module -e "import './dist/web.js'"
       - run: npm test
       # Shell-test wiring (SEEDREFRESH826 fold-in, from the #1066 verify): a
       # regression guard that only runs manually rots exactly like a one-shot
