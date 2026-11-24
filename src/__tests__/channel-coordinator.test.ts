@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mapUpdate, getUpdates, TelegramApiError } from '../channel-coordinator/telegram-client.js'
+import { mapUpdate, getUpdates, probeHighWater, TelegramApiError } from '../channel-coordinator/telegram-client.js'
 import {
   initIngestDb,
   insertIncomingEvent,
@@ -211,7 +211,36 @@ describe('ingest', () => {
 // ---- getUpdates error classification (mocked fetch) ---------------------
 
 describe('getUpdates error classification', () => {
-  afterEach(() => { vi.unstubAllGlobals() })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it.each([
+    ['poll', () => getUpdates('fixture', 0, 0, 100), 200],
+    ['error response', () => getUpdates('fixture', 0, 0, 100), 502],
+    ['high-water probe', () => probeHighWater('fixture'), 200],
+  ] as const)('times out a stalled %s response body and permits the next poll', async (_label, poll, status) => {
+    vi.useFakeTimers()
+    const fixture = [{ update_id: 12 }]
+    const fetch = vi.fn()
+      .mockImplementationOnce(async (_url: string, { signal }: { signal: AbortSignal }) => ({
+        ok: status === 200,
+        status,
+        json: () => new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        }),
+      }))
+      .mockResolvedValueOnce(Response.json({ ok: true, result: fixture }))
+    vi.stubGlobal('fetch', fetch)
+    const onFailure = vi.fn()
+    const stalled = poll().catch(onFailure)
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(onFailure).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ kind: 'transient' }))
+    await stalled
+    await expect(getUpdates('fixture', 0, 0, 100)).resolves.toEqual(fixture)
+  })
 
   function stubFetch(status: number, body: unknown) {
     vi.stubGlobal('fetch', vi.fn(async () => ({

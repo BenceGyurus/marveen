@@ -155,57 +155,65 @@ export function mapUpdate(u: RawUpdate): NormalizedEvent | null {
   return null
 }
 
-// Long-poll getUpdates. `timeout` is the Telegram-side long-poll seconds; the
-// HTTP read-timeout is timeout + 10 so a healthy long-poll that returns near
-// its deadline is never aborted mid-flight, while a wedged connection still
-// gets torn down.
+interface UpdatesResponse {
+  ok?: boolean
+  result?: RawUpdate[]
+  error_code?: number
+  description?: string
+  parameters?: { retry_after?: number }
+}
+
+async function requestUpdates(
+  token: string,
+  options: { offset: number; timeout: number; limit: number; allowed_updates?: typeof ALLOWED_UPDATES },
+): Promise<{ response: Response; body: UpdatesResponse | null }> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), (options.timeout + 10) * 1000)
+  try {
+    const response = await fetch(`${API_BASE}/bot${token}/getUpdates`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(options),
+      signal: controller.signal,
+    })
+    let body: UpdatesResponse | null = null
+    try {
+      body = await response.json() as UpdatesResponse | null
+    } catch (error) {
+      // A proxy error can be plain text. Keep its HTTP status for classification,
+      // but treat a stalled body exactly like a stalled connection.
+      if (controller.signal.aborted || response.ok) throw error
+    }
+    return { response, body }
+  } catch {
+    throw new TelegramApiError('transient', controller.signal.aborted
+      ? 'getUpdates request timed out'
+      : 'getUpdates request or response failed')
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function getUpdates(
   token: string,
   offset: number,
   timeout: number,
   limit: number,
 ): Promise<RawUpdate[]> {
-  const controller = new AbortController()
-  const abortTimer = setTimeout(() => controller.abort(), (timeout + 10) * 1000)
-  let res: Response
-  try {
-    res = await fetch(`${API_BASE}/bot${token}/getUpdates`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ offset, timeout, limit, allowed_updates: ALLOWED_UPDATES }),
-      signal: controller.signal,
-    })
-  } catch (err) {
-    // Network failure, DNS, or our own abort: all retryable.
-    throw new TelegramApiError('transient', `network error: ${err instanceof Error ? err.message : String(err)}`)
-  } finally {
-    clearTimeout(abortTimer)
-  }
-
-  if (!res.ok) {
-    // Bot-API mirrors error_code in the JSON body with parameters.retry_after.
-    // Parse defensively -- a proxy 5xx may not be JSON at all.
-    let errorCode = res.status
-    let description = `HTTP ${res.status}`
-    let retryAfter: number | undefined
-    try {
-      const body = await res.json() as { error_code?: number; description?: string; parameters?: { retry_after?: number } }
-      if (typeof body.error_code === 'number') errorCode = body.error_code
-      if (body.description) description = body.description
-      retryAfter = body.parameters?.retry_after
-    } catch { /* non-JSON error body, fall back to status */ }
-
+  const { response, body } = await requestUpdates(token, { offset, timeout, limit, allowed_updates: ALLOWED_UPDATES })
+  if (!response.ok) {
+    const errorCode = typeof body?.error_code === 'number' ? body.error_code : response.status
+    const description = body?.description ?? `HTTP ${response.status}`
     if (errorCode === 401) throw new TelegramApiError('fatal', `401 unauthorized: ${description}`)
     if (errorCode === 409) throw new TelegramApiError('conflict', `409 conflict: ${description}`)
-    if (errorCode === 429) throw new TelegramApiError('rate_limit', `429 too many requests: ${description}`, retryAfter)
+    if (errorCode === 429) throw new TelegramApiError('rate_limit', `429 too many requests: ${description}`, body?.parameters?.retry_after)
     if (errorCode >= 500) throw new TelegramApiError('transient', `5xx: ${description}`)
-    // 400 / 403 / other 4xx on getUpdates are configuration bugs, not transient.
     throw new TelegramApiError('fatal', `unexpected ${errorCode}: ${description}`)
   }
-
-  const json = await res.json() as { ok: boolean; result?: RawUpdate[]; description?: string }
-  if (!json.ok) throw new TelegramApiError('transient', `getUpdates ok=false: ${json.description ?? 'unknown'}`)
-  return json.result ?? []
+  if (!body?.ok || !Array.isArray(body.result)) {
+    throw new TelegramApiError('transient', 'getUpdates returned no valid result')
+  }
+  return body.result
 }
 
 // Probe the current server-side high-water update_id WITHOUT confirming anything
@@ -218,27 +226,14 @@ export async function getUpdates(
 // null when the queue is empty. Used to seed poll_offset on entering a backfill
 // window so we never re-deliver below the true high-water.
 export async function probeHighWater(token: string): Promise<number | null> {
-  const controller = new AbortController()
-  const abortTimer = setTimeout(() => controller.abort(), 10_000)
-  let res: Response
-  try {
-    res = await fetch(`${API_BASE}/bot${token}/getUpdates`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ offset: -1, limit: 1, timeout: 0 }),
-      signal: controller.signal,
-    })
-  } catch (err) {
-    throw new TelegramApiError('transient', `high-water probe network error: ${err instanceof Error ? err.message : String(err)}`)
-  } finally {
-    clearTimeout(abortTimer)
+  const { response, body } = await requestUpdates(token, { offset: -1, limit: 1, timeout: 0 })
+  if (!response.ok) {
+    if (response.status === 401) throw new TelegramApiError('fatal', '401 unauthorized (high-water probe)')
+    if (response.status === 409) throw new TelegramApiError('conflict', '409 conflict (high-water probe)')
+    throw new TelegramApiError('transient', `high-water probe HTTP ${response.status}`)
   }
-  if (!res.ok) {
-    if (res.status === 401) throw new TelegramApiError('fatal', '401 unauthorized (high-water probe)')
-    if (res.status === 409) throw new TelegramApiError('conflict', '409 conflict (high-water probe)')
-    throw new TelegramApiError('transient', `high-water probe HTTP ${res.status}`)
+  if (!body?.ok || !Array.isArray(body.result)) {
+    throw new TelegramApiError('transient', 'high-water probe returned no valid result')
   }
-  const json = await res.json() as { ok: boolean; result?: RawUpdate[] }
-  const last = json.result && json.result.length ? json.result[json.result.length - 1] : null
-  return last ? last.update_id : null
+  return body.result.at(-1)?.update_id ?? null
 }
