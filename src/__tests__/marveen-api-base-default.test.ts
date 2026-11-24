@@ -42,6 +42,12 @@ describe('marveen_api.api_base default', () => {
 
   it('an install that binds ::1 only gets [::1]', () => {
     expect(apiBase('WEB_HOST=::1\nWEB_PORT=3999\n')).toBe('http://[::1]:3999')
+    expect(apiBase('WEB_HOST=::\nWEB_PORT=3999\n')).toBe('http://[::1]:3999')
+  })
+
+  it('an install that binds a specific LAN IP in WEB_HOST uses that IP directly', () => {
+    expect(apiBase('WEB_HOST=192.0.2.10\nWEB_PORT=3420\n')).toBe('http://192.0.2.10:3420')
+    expect(apiBase('WEB_HOST=2001:db8::10\nWEB_PORT=3420\n')).toBe('http://[2001:db8::10]:3420')
   })
 
   it('an explicit MARVEEN_API_BASE still wins, unchanged', () => {

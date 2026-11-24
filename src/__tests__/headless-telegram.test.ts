@@ -175,4 +175,44 @@ describe('headless Telegram replies', () => {
       content: [{ text: expect.stringContaining('TELEGRAM_BOT_TOKEN not configured') }],
     })
   })
+
+  it('sends local photos via telegram_send_photo with scoped bot isolation and allowlist checks', () => {
+    const bridge = resolve('scripts/channel-reply-mcp.mjs')
+    const loader = join(root, 'photo-fetch-stub.mjs')
+    const samplePng = join(root, 'sample.png')
+    writeFileSync(samplePng, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    writeFileSync(loader, `
+      globalThis.fetch = async (url, init) => {
+        if (!url.includes('/bot100:test-one/sendPhoto')) throw new Error('Wrong Telegram endpoint: ' + url)
+        if (!(init?.body instanceof FormData)) throw new Error('Expected FormData body')
+        return Response.json({ ok: true, result: { message_id: 99 } })
+      }
+    `)
+    const call = (dir: string, args: Record<string, unknown>) => {
+      const input = JSON.stringify({
+        jsonrpc: '2.0', id: 2, method: 'tools/call',
+        params: { name: 'telegram_send_photo', arguments: args },
+      }) + '\n'
+      const result = spawnSync(process.execPath, ['--import', loader, bridge], {
+        input, encoding: 'utf8',
+        env: { ...process.env, TELEGRAM_STATE_DIR: dir, MARVEEN_HEADLESS_TELEGRAM: '1' },
+      })
+      expect(result.status).toBe(0)
+      return JSON.parse(result.stdout).result
+    }
+    configure(stateDir, '100:test-one', ['42'])
+    expect(call(stateDir, { chat_id: '42', photo_path: samplePng, caption: 'ok' }).content[0].text).toContain('message_id: 99')
+    expect(call(stateDir, { chat_id: '999', photo_path: samplePng })).toMatchObject({
+      isError: true,
+      content: [{ text: expect.stringContaining('not in allowFrom') }],
+    })
+    expect(call(stateDir, { chat_id: '42', photo_path: join(root, 'nope.png') })).toMatchObject({
+      isError: true,
+      content: [{ text: expect.stringContaining('Photo file not found') }],
+    })
+    expect(call(join(root, 'missing'), { chat_id: '42', photo_path: samplePng })).toMatchObject({
+      isError: true,
+      content: [{ text: expect.stringContaining('TELEGRAM_BOT_TOKEN not configured') }],
+    })
+  })
 })

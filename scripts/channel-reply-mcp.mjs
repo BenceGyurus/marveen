@@ -5,8 +5,8 @@
  * in MCP config files, CLI arguments, or agent environments.
  */
 
-import { existsSync, lstatSync, readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs'
+import { basename, dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { listTelegramImages, readTelegramImage } from './telegram-image-cache.mjs'
@@ -164,6 +164,68 @@ async function sendTelegramReply(args) {
   return `sent (message_id: ${sentIds.join(', ') || 'ok'})`
 }
 
+const MIME_BY_EXT = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+}
+
+async function sendTelegramPhoto(args) {
+  const rawChatId = String(args?.chat_id ?? '').trim()
+  const photoPath = String(args?.photo_path ?? '').trim()
+  const caption = String(args?.caption ?? '').trim()
+  const replyToRaw = args?.reply_to_message_id ?? args?.reply_to
+  const replyTo = replyToRaw !== undefined && replyToRaw !== null && String(replyToRaw).trim() !== ''
+    ? Number(replyToRaw)
+    : undefined
+
+  const { token, allowFrom, scoped } = resolveTelegramCredentials()
+  const chatId = rawChatId || (allowFrom.size === 1 ? Array.from(allowFrom)[0] : '')
+  if (!chatId || !SAFE_CHAT_ID_RE.test(chatId)) {
+    throw new Error('Invalid or missing chat_id')
+  }
+  if (!token) {
+    throw new Error('TELEGRAM_BOT_TOKEN not configured on host')
+  }
+  if ((scoped || allowFrom.size > 0) && !allowFrom.has(chatId)) {
+    throw new Error(`chat_id ${chatId} is not in allowFrom`)
+  }
+  if (!photoPath) {
+    throw new Error('Missing photo_path')
+  }
+  const absPath = resolve(photoPath)
+  if (!isRegularFile(absPath)) {
+    throw new Error(`Photo file not found: ${absPath}`)
+  }
+  const size = statSync(absPath).size
+  if (size <= 0 || size > 10 * 1024 * 1024) {
+    throw new Error(`Photo size out of Telegram limits (1B..10MB): ${size} bytes`)
+  }
+
+  const ext = extname(absPath).toLowerCase()
+  const mime = MIME_BY_EXT[ext] || 'image/png'
+  const buf = readFileSync(absPath)
+  const form = new FormData()
+  form.append('chat_id', chatId)
+  form.append('photo', new Blob([buf], { type: mime }), basename(absPath))
+  if (caption) form.append('caption', caption.slice(0, 1024))
+  if (Number.isInteger(replyTo) && replyTo > 0) {
+    form.append('reply_to_message_id', String(replyTo))
+  }
+
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+    method: 'POST',
+    body: form,
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok || !data?.ok) {
+    throw new Error(`Telegram API error (${res.status}): ${data?.description || 'unknown'}`)
+  }
+  return `photo sent (message_id: ${data?.result?.message_id ?? 'ok'})`
+}
+
 const TOOLS = [
   {
     name: 'telegram_reply',
@@ -185,6 +247,32 @@ const TOOLS = [
         },
       },
       required: ['text'],
+    },
+  },
+  {
+    name: 'telegram_send_photo',
+    description: 'Send a local image file (PNG/JPG/WEBP/GIF, max 10MB) to a Telegram chat configured on this Marveen host.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chat_id: {
+          type: 'string',
+          description: 'Telegram chat ID (e.g. "123456789"). Omit only if a single default owner chat is configured.',
+        },
+        photo_path: {
+          type: 'string',
+          description: 'Absolute or workspace-relative path to the local image file.',
+        },
+        caption: {
+          type: 'string',
+          description: 'Optional photo caption (max 1024 chars).',
+        },
+        reply_to_message_id: {
+          type: 'string',
+          description: 'Optional Telegram message_id to thread as a reply.',
+        },
+      },
+      required: ['photo_path'],
     },
   },
   {
@@ -266,6 +354,15 @@ async function handleRequest(msg) {
       }
       if (name === 'telegram_reply') {
         const resultText = await sendTelegramReply(params?.arguments || {})
+        writeRpc({
+          jsonrpc: '2.0',
+          id,
+          result: { content: [{ type: 'text', text: resultText }] },
+        })
+        return
+      }
+      if (name === 'telegram_send_photo') {
+        const resultText = await sendTelegramPhoto(params?.arguments || {})
         writeRpc({
           jsonrpc: '2.0',
           id,

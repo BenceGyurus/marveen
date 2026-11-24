@@ -19,6 +19,7 @@ Exit codes: 0 = HTTP 2xx; 1 = the server answered with a non-2xx status (the bod
 stderr); 2 = usage error or no token, nothing was sent; 3 = the dashboard could not be reached or did not answer.
 """
 import datetime
+import ipaddress
 import json
 import os
 import posixpath
@@ -117,19 +118,49 @@ def env_file_values(*keys):
     return out
 
 
+def default_web_host():
+    """Local dashboard host derived from this install's .env WEB_HOST.
+
+    Wildcard/empty binds use literal IPv4/IPv6 loopback (never 'localhost', which can
+    resolve to ::1 while the server listens on IPv4 only). When WEB_HOST binds a
+    specific IP literal (e.g. a LAN interface), the dashboard does not listen on
+    127.0.0.1, so use that configured IP literal directly.
+    """
+    raw = (env_file_values('WEB_HOST').get('WEB_HOST') or '').strip()
+    if not raw or raw in ('0.0.0.0', '127.0.0.1', 'localhost'):
+        return '127.0.0.1'
+    if raw in ('::', '::1', '[::]', '[::1]'):
+        return '[::1]'
+    try:
+        ip = ipaddress.ip_address(raw.strip('[]'))
+    except ValueError:
+        return '127.0.0.1'
+    return f'[{ip}]' if ip.version == 6 else str(ip)
+
+
+def configured_origins():
+    vals = env_file_values('AGENT_API_ORIGIN', 'DASHBOARD_PUBLIC_URL', 'WEB_PORT')
+    out = {vals[k].rstrip('/') for k in ('AGENT_API_ORIGIN', 'DASHBOARD_PUBLIC_URL') if vals.get(k)}
+    host = default_web_host()
+    if host not in ('127.0.0.1', '[::1]'):
+        port = os.environ.get('MARVEEN_WEB_PORT') or os.environ.get('WEB_PORT') or vals.get('WEB_PORT') or '3420'
+        out.add(f'http://{host}:{port}')
+    return out
+
+
 def check_env():
     """Refuses an environment that would send the token elsewhere; None when it is fine.
 
     The token goes to MARVEEN_API_BASE and comes from MARVEEN_TOKEN_FILE, and both are plain
     environment. A base is accepted only on loopback, or when it is exactly this install's own
-    AGENT_API_ORIGIN or DASHBOARD_PUBLIC_URL from its .env (a remote agent's route). The token file
+    AGENT_API_ORIGIN, DASHBOARD_PUBLIC_URL, or bound WEB_HOST:WEB_PORT from its .env. The token file
     must be a .dashboard-token, so the helper cannot send another file's first line as a header."""
     base = os.environ.get('MARVEEN_API_BASE')
     if base:
         b = base.strip().rstrip('/')
         u = urllib.parse.urlsplit(b)
         on_loopback = u.scheme in ('http', 'https') and u.hostname in LOOPBACK_HOSTS
-        configured = {v.rstrip('/') for v in env_file_values('AGENT_API_ORIGIN', 'DASHBOARD_PUBLIC_URL').values() if v}
+        configured = configured_origins()
         if not on_loopback and b not in configured:
             return (f'MARVEEN_API_BASE={b} is neither loopback nor this install\'s AGENT_API_ORIGIN or '
                     'DASHBOARD_PUBLIC_URL (.env); nothing was sent.')
@@ -160,10 +191,7 @@ def api_base():
     if base:
         return base.strip().rstrip('/')
     port = os.environ.get('MARVEEN_WEB_PORT') or os.environ.get('WEB_PORT') or env_file_values('WEB_PORT').get('WEB_PORT')
-    # A literal loopback address, not "localhost": where localhost resolves to ::1 first and the dashboard
-    # listens on IPv4 only (WEB_HOST defaults to 127.0.0.1, src/config.ts), urllib has no fallback to the next
-    # address in time and every call waits for its 30 s timeout. Only an install that binds ::1 gets [::1].
-    host = '[::1]' if env_file_values('WEB_HOST').get('WEB_HOST') == '::1' else '127.0.0.1'
+    host = default_web_host()
     return f'http://{host}:{port or 3420}'
 
 
