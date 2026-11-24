@@ -47,6 +47,7 @@ ST
 cat > "$F/bin/curl" <<'CU'
 #!/usr/bin/env bash
 [ "${HEALTH_DOWN:-0}" = "1" ] && exit 7
+[ -n "${HEALTH_URL:-}" ] && [ "${@: -1}" != "$HEALTH_URL" ] && exit 7
 exit 0
 CU
 printf '#!/usr/bin/env bash\nexit 0\n' > "$F/bin/sleep"     # keep the failing health poll fast
@@ -88,6 +89,18 @@ check "3 the trap line comes after stage=restart and before stage=unit-drift" \
 
 check "3 the finalizer survives the TERM and still writes the success verdict" \
   "$(grep -q '"status":"success"' "$F/store/res.json" 2>/dev/null && echo 0 || echo 1)"
+
+for binding in '192.168.100.19|192.168.100.19' '0.0.0.0|127.0.0.1' '::|[::1]' '::1|[::1]'; do
+  host="${binding%%|*}"
+  target="${binding#*|}"
+  printf 'MAIN_AGENT_ID=teszt\n WEB_HOST = "%s"\n' "$host" > "$F/.env"
+  rm -f "$F/store/res.json"
+  out="$(fin_run HEALTH_URL="http://${target}:3420/")"
+  got="$(stages <<<"$out")"
+  check "binding $host: success without rollback" \
+    "$([ "$got" = "restart unit-drift health write-verdict" ] && grep -q '"status":"success"' "$F/store/res.json" && echo 0 || echo 1)" \
+    "got: $got"
+done
 
 echo
 if [ "$FAILS" -gt 0 ]; then echo "$FAILS FAILED of $N" >&2; exit 1; fi

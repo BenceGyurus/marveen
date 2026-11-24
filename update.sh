@@ -80,14 +80,6 @@ native_module_loads() {
   node -e "new (require('better-sqlite3'))(':memory:').close()" >/dev/null 2>&1
 }
 
-health_ok() {
-  local port="${WEB_PORT:-3420}" i=0
-  while [ "$i" -lt 20 ]; do
-    if curl -fsS -m 3 -o /dev/null "http://127.0.0.1:${port}/" 2>/dev/null; then return 0; fi
-    sleep 1; i=$(( i + 1 ))
-  done
-  return 1
-}
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -2292,9 +2284,32 @@ _notify() { # status [message]
   bash "$INSTALL_DIR/scripts/notify.sh" "$msg" >/dev/null 2>&1 || true
 }
 _finish() { _write "$1" "$2" "$3" "$4"; _notify "$1" "$4"; exit "$3"; }
-_health() { local i=0; while [ "$i" -lt 20 ]; do
-  curl -fsS -m 3 -o /dev/null "http://127.0.0.1:${PORT}/" 2>/dev/null && return 0
-  sleep 1; i=$(( i + 1 )); done; return 1; }
+_health() {
+  local host='' line i=0
+  if [ -r "$INSTALL_DIR/.env" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      [[ "$line" =~ ^[[:space:]]*WEB_HOST[[:space:]]*=(.*)$ ]] || continue
+      host="${BASH_REMATCH[1]}"
+      host="${host#"${host%%[![:space:]]*}"}"
+      host="${host%"${host##*[![:space:]]}"}"
+      case "$host" in
+        \"*\") host="${host:1:${#host}-2}" ;;
+        \'*\') host="${host:1:${#host}-2}" ;;
+      esac
+    done < "$INSTALL_DIR/.env"
+  fi
+  case "$host" in
+    ''|0.0.0.0) host=127.0.0.1 ;;
+    ::) host=::1 ;;
+  esac
+  [[ "$host" =~ ^[[:alnum:]_.:%-]+$ ]] || return 1
+  [[ "$host" == *:* ]] && host="[$host]"
+  while [ "$i" -lt 20 ]; do
+    curl -fsS --noproxy '*' -m 3 -o /dev/null "http://${host}:${PORT}/" 2>/dev/null && return 0
+    sleep 1; i=$(( i + 1 ))
+  done
+  return 1
+}
 _restart() { "$INSTALL_DIR/scripts/stop.sh"; "$INSTALL_DIR/scripts/start.sh"; }
 
 # ZAKARFELUGY921: THE PORT ANSWERING IS NOT PROOF THAT THE SERVICES ARE UNDER
