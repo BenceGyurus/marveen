@@ -4,7 +4,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "build": "tsc && node scripts/build-web-assets.mjs && node scripts/write-built-commit.cjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-web-assets.mjs && node scripts/write-built-commit.cjs",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "setup": "tsx scripts/setup.ts",

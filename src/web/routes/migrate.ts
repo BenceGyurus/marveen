@@ -131,7 +131,7 @@ export async function tryHandleMigrate(ctx: RouteContext): Promise<boolean> {
         if (!existsSync(scanPath)) continue
         const files = readdirSync(scanPath).filter(f =>
           (f.endsWith('.md') || f.endsWith('.txt') || f.endsWith('.json')) &&
-          !['package.json', 'tsconfig.json', 'package-lock.json', '.mcp.json'].includes(f)
+          !['package.json', 'tsconfig.json', 'tsconfig.build.json', 'package-lock.json', '.mcp.json'].includes(f)
         )
         for (const f of files) {
           const fullPath = join(scanPath, f)
