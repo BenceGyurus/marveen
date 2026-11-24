@@ -33,6 +33,39 @@ function configure(dir: string, token: string, allowFrom: string[]) {
 }
 
 describe('headless Telegram intake', () => {
+  it('resumes polling and enqueues updates after a response body stalls without restarting the agent', async () => {
+    configure(stateDir, '100:test-one', ['42'])
+    const fetch = vi.fn()
+      .mockImplementationOnce(async (_url: string, { signal }: { signal: AbortSignal }) => ({
+        ok: true,
+        status: 200,
+        json: () => new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        }),
+      }))
+      .mockImplementation(async () => Response.json({ ok: true, result: [update(8, 42)] }))
+    vi.stubGlobal('fetch', fetch)
+    vi.useFakeTimers()
+    const stop = startHeadlessTelegramPolling()
+    try {
+      registerHeadlessAgent({
+        name: 'marketing', session: 'agent-marketing', cliType: 'agy', model: 'agy:gemini-4-hydrogen-high',
+        dir: root, skipPermissions: false, telegramStateDir: stateDir,
+      })
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(fetch).toHaveBeenCalledOnce()
+      expect(getOffset('telegram:marketing:100')).toBe(0)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(fetch).toHaveBeenCalledTimes(2)
+      expect(initIngestDb().prepare('SELECT to_agent FROM agent_messages').get()).toEqual({ to_agent: 'marketing' })
+    } finally {
+      unregisterHeadlessAgent('marketing')
+      stop()
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('starts polling a registered AGY agent and stops polling when it is unregistered', async () => {
     configure(stateDir, '100:test-one', ['42'])
     const fetch = vi.fn().mockResolvedValue(Response.json({ ok: true, result: [update(8, 42)] }))
