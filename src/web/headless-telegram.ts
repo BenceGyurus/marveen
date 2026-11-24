@@ -5,7 +5,8 @@ import { buildHandoffContent, resolveCoordinatorTelegramToken } from '../channel
 import { cacheTelegramImages } from '../channel-coordinator/images.js'
 import { closeIngestDb, commitIncomingBatch, getOffset, initIngestDb } from '../channel-coordinator/ingest.js'
 import { getUpdates, mapUpdate, TelegramApiError, type NormalizedEvent } from '../channel-coordinator/telegram-client.js'
-import { channelStateDir, getProvider, readChannelToken } from '../channel-provider.js'
+import { channelStateDir, getProvider } from '../channel-provider.js'
+import { parseEnvContent } from '../env-parse.js'
 import { logger } from '../logger.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { getHeadlessAgentState, listHeadlessTelegramAgents } from './headless-runner.js'
@@ -13,7 +14,13 @@ import { getHeadlessAgentState, listHeadlessTelegramAgents } from './headless-ru
 const POLL_MS = 5_000
 const PAIRING_TTL_MS = 60 * 60_000
 const getBotId = (token: string | null) => /^(\d+):[A-Za-z0-9_-]+$/.exec(token ?? '')?.[1]
-const readToken = (dir: string) => readChannelToken('telegram', join(dir, '.env'))
+function readToken(dir: string): string | null {
+  try {
+    return parseEnvContent(readFileSync(join(dir, '.env'), 'utf-8'), ['TELEGRAM_BOT_TOKEN']).TELEGRAM_BOT_TOKEN || null
+  } catch {
+    return null
+  }
+}
 
 interface PairingRequest {
   senderId: string
@@ -29,13 +36,20 @@ interface Access {
   pending?: Record<string, PairingRequest>
 }
 
-function readAccess(path: string): Access | null {
+class InvalidTelegramAccess extends Error {
+  constructor() { super('invalid-access: check access.json') }
+}
+
+function readAccess(path: string): Access {
   try {
     const data = JSON.parse(readFileSync(path, 'utf-8'))
-    if (!data || !Array.isArray(data.allowFrom)) return null
+    if (!data || !Array.isArray(data.allowFrom)) throw new InvalidTelegramAccess()
     return data
-  } catch {
-    return null
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { dmPolicy: 'pairing', allowFrom: [], groups: {}, pending: {} }
+    }
+    throw new InvalidTelegramAccess()
   }
 }
 
@@ -63,7 +77,8 @@ export async function pollHeadlessTelegram(
   const token = readToken(stateDir)
   const botId = getBotId(token)
   const accessPath = join(stateDir, 'access.json')
-  if (!token || !botId || botId === opts.mainBotId || !readAccess(accessPath)) return
+  if (!token || !botId || botId === opts.mainBotId) return
+  readAccess(accessPath)
 
   initIngestDb()
   const source = `telegram:${name}:${botId}`
@@ -71,7 +86,6 @@ export async function pollHeadlessTelegram(
   const updates = await (opts.fetchUpdates ?? getUpdates)(token, offset ? offset + 1 : 0, 0, 100)
   if (updates.length === 0 || opts.isCurrent?.() === false || readToken(stateDir) !== token) return
   const access = readAccess(accessPath)
-  if (!access) return
 
   const events: NormalizedEvent[] = []
   const pairings: { code: string; chatId: string }[] = []
@@ -102,8 +116,8 @@ export async function pollHeadlessTelegram(
   let handoffs = events
   if (events.some(event => event.meta.image)) {
     const cached = await cacheTelegramImages(events, token)
+    if (opts.isCurrent?.() === false || readToken(stateDir) !== token) return
     const currentAccess = readAccess(accessPath)
-    if (!currentAccess || opts.isCurrent?.() === false || readToken(stateDir) !== token) return
     handoffs = events.filter(event => isAllowed(event, currentAccess))
     for (const event of handoffs) {
       const image = cached.get(event.update_id)
@@ -129,6 +143,13 @@ export function startHeadlessTelegramPolling(): () => void {
   let stopped = false
   const inFlight = new Set<string>()
   const retryAt = new Map<string, number>()
+  const started = new WeakSet()
+  const blocked = new WeakMap<object, string>()
+  function reportBlocked(agent: { name: string }, kind: string): void {
+    if (blocked.get(agent) === kind) return
+    blocked.set(agent, kind)
+    logger.warn({ name: agent.name, kind }, 'Headless Telegram polling blocked')
+  }
   const timer = setInterval(() => {
     const agents = listHeadlessTelegramAgents()
     if (agents.length === 0) return
@@ -140,6 +161,7 @@ export function startHeadlessTelegramPolling(): () => void {
       const dir = agent.telegramStateDir
       if (!dir) return []
       const botId = getBotId(readToken(dir))
+      if (!botId) reportBlocked(agent, 'missing-or-invalid-token')
       return botId ? [{ agent, dir, botId }] : []
     })
     const counts = new Map<string, number>()
@@ -148,17 +170,28 @@ export function startHeadlessTelegramPolling(): () => void {
       if (!counts.has(key)) retryAt.delete(key)
     }
     for (const { agent, dir, botId } of targets) {
-      if (botId === mainBotId || botId === nativeMainBotId || counts.get(botId) !== 1 ||
-        inFlight.has(botId) || (retryAt.get(botId) ?? 0) > Date.now()) continue
+      if (botId === mainBotId || botId === nativeMainBotId || counts.get(botId) !== 1) {
+        reportBlocked(agent, 'duplicate-bot')
+        continue
+      }
+      blocked.delete(agent)
+      if (inFlight.has(botId) || (retryAt.get(botId) ?? 0) > Date.now()) continue
       inFlight.add(botId)
       void pollHeadlessTelegram(agent.name, dir, {
         mainBotId,
         isCurrent: () => !stopped && getHeadlessAgentState(agent.name) === agent,
-      }).then(() => retryAt.delete(botId)).catch((error: unknown) => {
+      }).then(() => {
+        retryAt.delete(botId)
+        if (!started.has(agent)) {
+          started.add(agent)
+          logger.info({ name: agent.name }, 'Headless Telegram poll completed')
+        }
+      }).catch((error: unknown) => {
         const apiError = error instanceof TelegramApiError ? error : undefined
         const waitMs = apiError?.kind === 'rate_limit' ? (apiError.retryAfterSec ?? 30) * 1_000 : 60_000
         retryAt.set(botId, Date.now() + Math.max(POLL_MS, waitMs))
-        logger.warn({ name: agent.name, kind: apiError?.kind ?? 'processing' }, 'Headless Telegram poll failed; will retry')
+        const kind = error instanceof InvalidTelegramAccess ? 'invalid-access' : apiError?.kind ?? 'processing'
+        logger.warn({ name: agent.name, kind }, 'Headless Telegram poll failed; will retry')
       }).finally(() => inFlight.delete(botId))
     }
   }, POLL_MS)

@@ -100,8 +100,23 @@ describe('headless Telegram intake', () => {
     configure(stateDir, '100:test-one', ['42'])
     writeFileSync(join(stateDir, 'access.json'), '{broken')
     const fetchUpdates = vi.fn()
-    await pollHeadlessTelegram('marketing', stateDir, { fetchUpdates })
+    await expect(pollHeadlessTelegram('marketing', stateDir, { fetchUpdates })).rejects.toThrow('invalid-access')
     expect(fetchUpdates).not.toHaveBeenCalled()
+  })
+
+  it('polls a quoted bot token and creates a pairing request when access.json is missing', async () => {
+    writeFileSync(join(stateDir, '.env'), 'TELEGRAM_BOT_TOKEN="100:test-one"\n')
+    const fetchUpdates = vi.fn().mockResolvedValue([update(8, 42)])
+    const sendPairingNotice = vi.fn().mockResolvedValue(undefined)
+
+    await pollHeadlessTelegram('marketing', stateDir, { fetchUpdates, sendPairingNotice })
+
+    expect(fetchUpdates).toHaveBeenCalledExactlyOnceWith('100:test-one', 0, 0, 100)
+    expect(initIngestDb().prepare('SELECT count(*) AS count FROM agent_messages').get()).toEqual({ count: 0 })
+    const access = JSON.parse(readFileSync(join(stateDir, 'access.json'), 'utf8'))
+    expect(access).toMatchObject({ dmPolicy: 'pairing', allowFrom: [] })
+    expect(Object.values(access.pending)).toMatchObject([{ senderId: '42' }])
+    expect(sendPairingNotice).toHaveBeenCalledOnce()
   })
 
   it('creates dashboard pairing requests without forwarding unapproved messages', async () => {

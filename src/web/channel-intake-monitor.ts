@@ -34,6 +34,7 @@ import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { agentDir, listAgentNames } from './agent-config.js'
 import { isAgentRunning, withTmuxBatch } from './agent-process.js'
+import { getHeadlessAgentState } from './headless-runner.js'
 import { readLastIngestionTimestamp, readLastIngestionTimestampAcross, mainTranscriptDirs } from './inbound-probe.js'
 import { sendOwnerActionAlert } from './routine-alert.js'
 
@@ -189,7 +190,7 @@ export function formatIntakeAlert(agentName: string, decision: IntakeDecision, p
   if (decision.verdict === 'token-invalid') {
     return `🔇 ${agentName}: a Telegram elutasította a bot tokent (${probe.lastErrorMessage ?? 'nincs indoklás'}). A csatorna nem tud fogadni. ${silence}.`
   }
-  return `🔇 ${agentName}: ${probe.pendingUpdates} bejövő üzenet áll a Telegram sorában, és senki nem veszi le. A plugin fut, de a poll-ciklusa halott. ${silence}.`
+  return `🔇 ${agentName}: ${probe.pendingUpdates} bejövő üzenet vár a Telegram sorában, és a sor nem csökken. ${silence}.`
 }
 
 // ---------------------------------------------------------------------------
@@ -309,8 +310,12 @@ async function checkAgentIntake(agentName: string, projectRoot: string): Promise
   }
   if (!decision.alert) return
 
+  const headless = getHeadlessAgentState(agentName)
   logger.warn(
-    { agent: agentName, verdict: decision.verdict, pending: probe.pendingUpdates, silentForMs },
+    {
+      agent: agentName, verdict: decision.verdict, pending: probe.pendingUpdates, silentForMs,
+      headless: Boolean(headless), headlessTelegramConfigured: Boolean(headless?.telegramStateDir),
+    },
     'channel-intake-monitor: channel intake is dead',
   )
   // Owner-action, not self-heal: this monitor only observes and alerts, it
