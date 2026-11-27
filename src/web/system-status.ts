@@ -532,7 +532,9 @@ export function liveBlockSpecs(now = Date.now()): BlockSpec[] {
             const results = await Promise.all(entries.map(async ([name, bin]): Promise<string | null> => {
               if (!bin) return null
               try {
-                const { stdout } = await execFileAsync(bin, ['--version'], { timeout: 10_000 })
+                const probe = execFileAsync(bin, ['--version'], { timeout: 10_000 })
+                probe.child.stdin?.end()
+                const { stdout } = await probe
                 const ver = stdout.trim().split('\n')[0] || 'telepítve'
                 return `${name}: ${ver}`
               } catch {

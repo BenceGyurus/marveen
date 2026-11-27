@@ -25,6 +25,7 @@ import { computeTimeoutAt } from './approvals.js'
 import { createApproval, getApproval, resolveApproval } from '../../db.js'
 import { computeRebasePlan, UPDATE_REBASE_CATEGORY, UPDATE_REBASE_WINDOW_S, type PlanGitRunner } from '../../update-rebase-plan.js'
 import { randomUUID } from 'node:crypto'
+import { providerStatus } from '../provider-status.js'
 import { deployment, MANAGED_BY_IMAGE } from '../deployment.js'
 
 const execFileAsync = promisify(execFile)
@@ -103,6 +104,11 @@ function isDiagnosable(r: LastResult | null): boolean {
 
 export async function tryHandleUpdates(ctx: RouteContext): Promise<boolean> {
   const { res, req, path, method } = ctx
+
+  if (method === 'GET' && path === '/api/updates/providers') {
+    json(res, await providerStatus())
+    return true
+  }
 
   // HOSTINGERDOCKER1107: in the container the image owns the version: no update.sh and no CLI install from here.
   if (method === 'POST' && (path === '/api/updates/apply' || path === '/api/updates/cli/apply') && deployment() === 'docker') {
