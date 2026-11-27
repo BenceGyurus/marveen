@@ -1,5 +1,6 @@
-import { spawnSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { createInterface } from 'node:readline'
+import { symlinkSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -90,6 +91,7 @@ describe('Telegram image intake', () => {
 
     const scriptDir = join(root, 'scripts')
     const stateDir = join(root, 'state')
+    symlinkSync(resolve('node_modules'), join(root, 'node_modules'), 'dir')
     mkdirSync(scriptDir)
     mkdirSync(stateDir)
     for (const script of ['channel-reply-mcp.mjs', 'telegram-image-cache.mjs']) {
@@ -99,17 +101,25 @@ describe('Telegram image intake', () => {
     writeFileSync(join(stateDir, 'access.json'), JSON.stringify({ allowFrom: ['42'] }))
     const call = (id: number, name: string, args: Record<string, unknown>) =>
       JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })
-    const result = spawnSync(process.execPath, [join(scriptDir, 'channel-reply-mcp.mjs')], {
-      input: [
+    const child = spawn(process.execPath, [join(scriptDir, 'channel-reply-mcp.mjs')], {
+      env: { ...process.env, TELEGRAM_STATE_DIR: stateDir, MARVEEN_HEADLESS_TELEGRAM: '1' },
+    })
+    const lines = createInterface({ input: child.stdout })
+    const replies: ReturnType<typeof JSON.parse>[] = []
+    try {
+      child.stdin.write([
         call(1, 'telegram_list_images', { chat_id: '42', album_id: '555' }),
         call(2, 'telegram_read_image', { chat_id: '42', image_id: cached.get(1)!.id }),
         call(3, 'telegram_read_image', { chat_id: '43', image_id: cached.get(1)!.id }),
-      ].join('\n') + '\n',
-      encoding: 'utf8',
-      env: { ...process.env, TELEGRAM_STATE_DIR: stateDir, MARVEEN_HEADLESS_TELEGRAM: '1' },
-    })
-    expect(result.status).toBe(0)
-    const replies = result.stdout.trim().split('\n').map(line => JSON.parse(line))
+      ].join('\n') + '\n')
+      for await (const line of lines) {
+        replies.push(JSON.parse(line))
+        if (replies.length === 3) break
+      }
+    } finally {
+      child.stdin.end()
+      child.kill()
+    }
     const lookup = (id: number) => replies.find(reply => reply.id === id).result
     expect(JSON.parse(lookup(1).content[0].text).images.map((image: { messageId: number }) => image.messageId)).toEqual([1])
     expect(lookup(2).content).toEqual([{ type: 'image', mimeType: 'image/png', data: png.toString('base64') }])

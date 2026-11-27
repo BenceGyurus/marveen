@@ -1,3 +1,4 @@
+import type { Tool } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
@@ -465,7 +466,7 @@ export function toMcpTools(tools: ToolDefinition[]) {
   return tools.map(tool => ({
     name: tool.name,
     description: tool.description,
-    inputSchema: zodToJsonSchema(tool.schema),
+    inputSchema: { ...zodToJsonSchema(tool.schema), type: "object" } as Tool["inputSchema"],
     annotations: tool.annotations,
   }));
 }

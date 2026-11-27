@@ -20,3 +20,5 @@
 
 Rebuild: `cd vendor/gmail-mcp-fork && npm ci && npm run build`
 Run: `run.sh` (installs prod deps on first run, then execs `dist/index.js`).
+
+Local transport change: the stdio entry uses MCP TypeScript SDK 2.4.0 for both legacy initialization and 2026-07-28 discovery.
