@@ -5,6 +5,8 @@
  * in MCP config files, CLI arguments, or agent environments.
  */
 
+import { ProtocolError, ProtocolErrorCode, Server } from '@modelcontextprotocol/server'
+import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -303,109 +305,43 @@ const TOOLS = [
   },
 ]
 
-function writeRpc(msg) {
-  process.stdout.write(JSON.stringify(msg) + '\n')
-}
-
-async function handleRequest(msg) {
-  const { id, method, params } = msg
-  if (method === 'notifications/initialized' || id === undefined) return
-
+async function callTool({ params }) {
   try {
-    if (method === 'initialize') {
-      writeRpc({
-        jsonrpc: '2.0',
-        id,
-        result: {
-          protocolVersion: params?.protocolVersion || '2024-11-05',
-          capabilities: { tools: {} },
-          serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
-        },
-      })
-      return
-    }
-    if (method === 'ping') {
-      writeRpc({ jsonrpc: '2.0', id, result: {} })
-      return
-    }
-    if (method === 'tools/list') {
-      writeRpc({ jsonrpc: '2.0', id, result: { tools: TOOLS } })
-      return
-    }
-    if (method === 'tools/call') {
-      const name = params?.name
-      if (name === 'telegram_list_images' || name === 'telegram_read_image') {
-        const args = params?.arguments ?? {}
-        const chatId = String(args.chat_id ?? '').trim()
-        const { token, allowFrom, groupChats } = resolveTelegramCredentials()
-        if (!token || (!allowFrom.has(chatId) && !groupChats.has(chatId))) {
-          throw new Error('Telegram image chat is not authorized')
+    const name = params?.name
+    if (name === 'telegram_list_images' || name === 'telegram_read_image') {
+      const args = params?.arguments ?? {}
+      const chatId = String(args.chat_id ?? '').trim()
+      const { token, allowFrom, groupChats } = resolveTelegramCredentials()
+      if (!token || (!allowFrom.has(chatId) && !groupChats.has(chatId))) {
+        throw new Error('Telegram image chat is not authorized')
+      }
+      const content = name === 'telegram_read_image'
+        ? await readTelegramImage(DEFAULT_PROJECT_ROOT, token, chatId, args.image_id)
+        : {
+          type: 'text',
+          text: JSON.stringify(await listTelegramImages(DEFAULT_PROJECT_ROOT, token, chatId, {
+            albumId: args.album_id, after: args.after, limit: args.limit,
+          })),
         }
-        const content = name === 'telegram_read_image'
-          ? await readTelegramImage(DEFAULT_PROJECT_ROOT, token, chatId, args.image_id)
-          : {
-            type: 'text',
-            text: JSON.stringify(await listTelegramImages(DEFAULT_PROJECT_ROOT, token, chatId, {
-              albumId: args.album_id, after: args.after, limit: args.limit,
-            })),
-          }
-        writeRpc({ jsonrpc: '2.0', id, result: { content: [content] } })
-        return
-      }
-      if (name === 'telegram_reply') {
-        const resultText = await sendTelegramReply(params?.arguments || {})
-        writeRpc({
-          jsonrpc: '2.0',
-          id,
-          result: { content: [{ type: 'text', text: resultText }] },
-        })
-        return
-      }
-      if (name === 'telegram_send_photo') {
-        const resultText = await sendTelegramPhoto(params?.arguments || {})
-        writeRpc({
-          jsonrpc: '2.0',
-          id,
-          result: { content: [{ type: 'text', text: resultText }] },
-        })
-        return
-      }
-      writeRpc({
-        jsonrpc: '2.0',
-        id,
-        error: { code: -32601, message: `Unknown tool: ${String(name)}` },
-      })
-      return
+      return { content: [content] }
     }
-    writeRpc({
-      jsonrpc: '2.0',
-      id,
-      error: { code: -32601, message: `Method not found: ${String(method)}` },
-    })
+    if (name === 'telegram_reply') {
+      const resultText = await sendTelegramReply(params?.arguments || {})
+      return { content: [{ type: 'text', text: resultText }] }
+    }
+    if (name === 'telegram_send_photo') {
+      const resultText = await sendTelegramPhoto(params?.arguments || {})
+      return { content: [{ type: 'text', text: resultText }] }
+    }
   } catch (err) {
-    writeRpc({
-      jsonrpc: '2.0',
-      id,
-      result: {
-        isError: true,
-        content: [{ type: 'text', text: err instanceof Error ? err.message : String(err) }],
-      },
-    })
+    return { isError: true, content: [{ type: 'text', text: err instanceof Error ? err.message : String(err) }] }
   }
+  throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `Unknown tool: ${params.name}`)
 }
 
-let buffer = ''
-process.stdin.setEncoding('utf-8')
-process.stdin.on('data', (chunk) => {
-  buffer += chunk
-  let nl
-  while ((nl = buffer.indexOf('\n')) !== -1) {
-    const line = buffer.slice(0, nl).trim()
-    buffer = buffer.slice(nl + 1)
-    if (!line) continue
-    try {
-      const parsed = JSON.parse(line)
-      void handleRequest(parsed)
-    } catch { /* ignore malformed lines */ }
-  }
+serveStdio(() => {
+  const server = new Server({ name: SERVER_NAME, version: SERVER_VERSION }, { capabilities: { tools: {} } })
+  server.setRequestHandler('tools/list', async () => ({ tools: TOOLS }))
+  server.setRequestHandler('tools/call', callTool)
+  return server
 })

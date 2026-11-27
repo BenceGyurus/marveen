@@ -1,11 +1,7 @@
 #!/usr/bin/env node
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-    CallToolRequestSchema,
-    ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server, type CallToolRequest, type CallToolResult } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import fs from 'fs';
@@ -335,22 +331,9 @@ async function main() {
     // Initialize Gmail API
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-    // Server implementation
-    const server = new Server(
-        {
-            name: "gmail",
-            version: "1.0.0",
-        },
-        {
-            capabilities: {
-                tools: {},
-            },
-        },
-    );
-
     // Tool handlers
     // Filter available tools based on authorized scopes
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const listTools = async () => {
         const availableTools = toolDefinitions.filter(tool =>
             hasScope(authorizedScopes, tool.scopes)
         );
@@ -358,9 +341,9 @@ async function main() {
         // Apply optional TOOL_PREFIX so multiple server instances can coexist
         // in clients that dedupe tool entries by base name.
         return { tools: mcpTools.map(t => ({ ...t, name: TOOL_PREFIX + t.name })) };
-    });
+    };
 
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const callTool = async (request: CallToolRequest): Promise<CallToolResult> => {
         const { name: rawName, arguments: args } = request.params;
 
         // Strip TOOL_PREFIX only if the result is a known base tool name.
@@ -383,7 +366,7 @@ async function main() {
             };
         }
 
-        async function handleEmailAction(action: "send" | "draft", validatedArgs: any) {
+        async function handleEmailAction(action: "send" | "draft", validatedArgs: any): Promise<CallToolResult> {
             let message: string;
 
             try {
@@ -1741,10 +1724,14 @@ async function main() {
                 ],
             };
         }
-    });
+    };
 
-    const transport = new StdioServerTransport();
-    server.connect(transport);
+    serveStdio(() => {
+        const server = new Server({ name: "gmail", version: "1.0.0" }, { capabilities: { tools: {} } });
+        server.setRequestHandler("tools/list", listTools);
+        server.setRequestHandler("tools/call", callTool);
+        return server;
+    });
 }
 
 main().catch((error) => {

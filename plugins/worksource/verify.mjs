@@ -30,7 +30,18 @@ const server = spawn('node', [join(import.meta.dirname, 'server.mjs')], {
   stdio: ['pipe', 'pipe', 'pipe'],
 })
 
-const send = (msg) => server.stdin.write(JSON.stringify(msg) + '\n')
+const modern = process.argv.includes('--modern')
+const opening = modern ? { method: 'server/discover' } : {
+  method: 'initialize',
+  params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'verify', version: '0' } },
+}
+function send(msg, child = server) {
+  if (modern) msg.params = { ...msg.params, _meta: {
+    'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+    'io.modelcontextprotocol/clientCapabilities': {},
+  } }
+  child.stdin.write(JSON.stringify(msg) + '\n')
+}
 const inbox = []
 let buf = ''
 server.stdout.on('data', (chunk) => {
@@ -54,10 +65,7 @@ const waitFor = (pred, what, ms = 8000) =>
   })
 
 try {
-  send({
-    jsonrpc: '2.0', id: 1, method: 'initialize',
-    params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'verify', version: '0' } },
-  })
+  send({ jsonrpc: '2.0', id: 1, ...opening })
   const init = await waitFor((m) => m.id === 1, 'initialize result')
   check('server initializes', init.result != null)
   check(
@@ -65,7 +73,7 @@ try {
     init.result?.capabilities?.experimental?.['claude/channel'] != null,
     'without it a delivery would arrive as tool output, not as a turn',
   )
-  send({ jsonrpc: '2.0', method: 'notifications/initialized' })
+  if (!modern) send({ jsonrpc: '2.0', method: 'notifications/initialized' })
 
   send({ jsonrpc: '2.0', id: 2, method: 'tools/list' })
   const tools = await waitFor((m) => m.id === 2, 'tools/list result')
@@ -208,12 +216,10 @@ try {
       if (line) { try { inbox.push(JSON.parse(line)) } catch { /* framing noise */ } }
     }
   })
-  restarted.stdin.write(JSON.stringify({
-    jsonrpc: '2.0', id: 1, method: 'initialize',
-    params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'verify', version: '0' } },
-  }) + '\n')
-  await waitFor((m) => m.id === 1, 'restart initialize')
-  restarted.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n')
+  send({ jsonrpc: '2.0', id: 1, ...opening }, restarted)
+  await waitFor((m) => m.id === 1, 'restart handshake')
+  if (!modern) send({ jsonrpc: '2.0', method: 'notifications/initialized' }, restarted)
+  send({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, restarted)
   const redelivered = await waitFor(
     (m) => m.method === 'notifications/claude/channel' && m.params?.meta?.work_id === 'job-2',
     're-delivery of the unacknowledged item',

@@ -410,7 +410,7 @@ export function toMcpTools(tools) {
     return tools.map(tool => ({
         name: tool.name,
         description: tool.description,
-        inputSchema: zodToJsonSchema(tool.schema),
+        inputSchema: { ...zodToJsonSchema(tool.schema), type: "object" },
         annotations: tool.annotations,
     }));
 }

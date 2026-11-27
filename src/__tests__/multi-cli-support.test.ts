@@ -655,7 +655,7 @@ describe('headroom integration: launcher, MCP config sync, and sandboxed install
 
       // 3. JSON-RPC initialize + tools/list smoke test on real scripts/channel-reply-mcp.mjs
       const rpcInput = [
-        JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {} } }),
+        JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } } }),
         JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
         JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
       ].join('\n') + '\n'

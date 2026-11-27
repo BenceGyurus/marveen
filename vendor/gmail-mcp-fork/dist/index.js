@@ -1,7 +1,6 @@
 #!/usr/bin/env node
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
+import { Server } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import fs from 'fs';
@@ -267,25 +266,16 @@ async function main() {
     }
     // Initialize Gmail API
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-    // Server implementation
-    const server = new Server({
-        name: "gmail",
-        version: "1.0.0",
-    }, {
-        capabilities: {
-            tools: {},
-        },
-    });
     // Tool handlers
     // Filter available tools based on authorized scopes
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const listTools = async () => {
         const availableTools = toolDefinitions.filter(tool => hasScope(authorizedScopes, tool.scopes));
         const mcpTools = toMcpTools(availableTools);
         // Apply optional TOOL_PREFIX so multiple server instances can coexist
         // in clients that dedupe tool entries by base name.
         return { tools: mcpTools.map(t => ({ ...t, name: TOOL_PREFIX + t.name })) };
-    });
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    };
+    const callTool = async (request) => {
         const { name: rawName, arguments: args } = request.params;
         // Strip TOOL_PREFIX only if the result is a known base tool name.
         // Guards against accidental over-stripping when the prefix overlaps a tool name's start
@@ -1472,9 +1462,13 @@ async function main() {
                 ],
             };
         }
+    };
+    serveStdio(() => {
+        const server = new Server({ name: "gmail", version: "1.0.0" }, { capabilities: { tools: {} } });
+        server.setRequestHandler("tools/list", listTools);
+        server.setRequestHandler("tools/call", callTool);
+        return server;
     });
-    const transport = new StdioServerTransport();
-    server.connect(transport);
 }
 main().catch((error) => {
     console.error('Server error:', error);

@@ -8,7 +8,7 @@
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
-if [ ! -d node_modules ]; then
+if [ ! -d node_modules/@modelcontextprotocol/server ]; then
   npm ci --omit=dev --ignore-scripts --silent
 fi
 export GMAIL_OAUTH_PATH="${GMAIL_OAUTH_PATH:-$HOME/.gmail-mcp-v2/gcp-oauth.keys.json}"
