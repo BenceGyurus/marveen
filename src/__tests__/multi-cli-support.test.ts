@@ -302,7 +302,7 @@ describe('active-model: Antigravity and Codex transcript readers', () => {
       writeFileSync(
         join(codexDayDir, 'rollout-test.jsonl'),
         [
-          JSON.stringify({ timestamp: '2026-11-15T18:01:00Z', type: 'session_meta', payload: { cwd: codexWorkdir } }),
+          JSON.stringify({ timestamp: '2026-11-15T18:01:00Z', type: 'session_meta', payload: { base_instructions: { text: "x".repeat(32_768) }, cwd: codexWorkdir } }),
           JSON.stringify({ timestamp: '2026-11-15T18:01:01Z', type: 'turn_context', payload: { cwd: codexWorkdir, model: 'gpt-5.4' } }),
           JSON.stringify({
             timestamp: '2026-11-15T18:01:02Z',

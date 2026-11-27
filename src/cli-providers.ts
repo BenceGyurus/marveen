@@ -692,7 +692,8 @@ const codexAdapter: CliProviderAdapter = {
     try { candidates.add(realpathSync(workingDir)) } catch { /* ignore */ }
     let best: { file: string; mtimeMs: number } | null = null
     try {
-      const sessionsRoot = join(homeDir, '.codex', 'sessions')
+      const codexRoot = homeDir === homedir() && process.env.CODEX_HOME ? process.env.CODEX_HOME : join(homeDir, '.codex')
+      const sessionsRoot = join(codexRoot, 'sessions')
       if (!existsSync(sessionsRoot)) return null
       const years = readdirSync(sessionsRoot).filter(d => /^\d{4}$/.test(d)).sort().reverse()
       outer: for (const y of years.slice(0, 2)) {
@@ -715,13 +716,21 @@ const codexAdapter: CliProviderAdapter = {
             for (const item of files.slice(0, 15)) {
               if (best && item.mtimeMs <= best.mtimeMs) continue
               const fd = openSync(item.file, 'r')
-              let head = ''
+              // session_meta includes base_instructions and often exceeds one filesystem block.
+              const chunks: Buffer[] = []
               try {
-                const buf = Buffer.alloc(4096)
-                const n = readSync(fd, buf, 0, 4096, 0)
-                head = buf.toString('utf-8', 0, n)
+                for (let read = 0; read < 1024 * 1024;) {
+                  const buf = Buffer.allocUnsafe(8192)
+                  const n = readSync(fd, buf, 0, buf.length, null)
+                  if (!n) break
+                  read += n
+                  const data = buf.subarray(0, n)
+                  const newline = data.indexOf(10)
+                  chunks.push(newline < 0 ? data : data.subarray(0, newline))
+                  if (newline >= 0) break
+                }
               } finally { closeSync(fd) }
-              const firstLine = head.split('\n')[0]?.trim()
+              const firstLine = Buffer.concat(chunks).toString('utf8').trim()
               if (!firstLine) continue
               try {
                 const meta = JSON.parse(firstLine)
@@ -757,8 +766,7 @@ const codexAdapter: CliProviderAdapter = {
         const info = payload.info as Record<string, unknown> | undefined
         const lastUsage = info?.last_token_usage as Record<string, unknown> | undefined
         const inp = Number(lastUsage?.input_tokens) || 0
-        const cached = Number(lastUsage?.cached_input_tokens) || 0
-        const total = Number(lastUsage?.total_tokens) || (inp + cached)
+        const total = Number(lastUsage?.total_tokens) || (inp + (Number(lastUsage?.output_tokens) || 0))
         if (total > 0) contextTokens = total
       } else if (payload.type === 'user_message' || payload.type === 'agent_message') {
         isTurnActivity = true

@@ -226,11 +226,7 @@ curl -s -X POST http://localhost:{{WEB_PORT}}/api/schedules \
 - **task**: Mindig szól az eredménnyel Telegramon
 - **heartbeat**: Csendes ellenőrzés, CSAK fontosnál/sürgősnél ír Telegramon
 
-### Cron formátum:
-`perc óra nap hónap hétnapja` - Példák:
-- `0 8 * * *` = minden nap 8:00
-- `*/30 * * * *` = 30 percenként
-- `0 9 * * 1-5` = hétköznap 9:00
+Cron-példák: `{{INSTALL_DIR}}/docs/agent-procedures-hu.md`.
 
 ### Fontos:
 - A feladat csak akkor fut le, ha a te tmux session-öd fut
@@ -297,32 +293,9 @@ Te egy önfejlesztő ágens vagy. A munkád során tanulsz, és újrafelhasznál
 ### Automatikus skill generálás
 Komplex feladatok után (5+ tool hívás, hiba utáni recovery, user korrekció, többlépéses workflow) írj SKILL.md-t. A fő ágensnek nincs csak-saját skill-mappája, ezért minden új vagy javított skill javaslatként megy. Hogy azonnal élesedik (a scan és az audit akkor is lefut), vagy a gazda jóváhagyásáig karanténban vár, azt a SKILL_QUARANTINE kapcsoló dönti el, a válasz `live` mezője megmondja; ha a név már él, élesedéskor a régi változat mentésre kerül.
 
-Az indokot (miért kell, mit javít) előbb írd az `.claude/skill-javaslat/indok.txt` fájlba a Write eszközzel, utána futtasd az alábbi blokkot.
+Az indokot (miért kell, mit javít) előbb írd az `.claude/skill-javaslat/indok.txt` fájlba a Write eszközzel.
 
-```bash
-mkdir -p .claude/skill-javaslat && cat > .claude/skill-javaslat/SKILL.md << 'SKILLEOF'
----
-name: skill-nev
-description: Mikor használd, mit csinál. Legyél konkrét a triggerelésben.
----
-# Skill neve
-
-## Mikor használd
-[Konkrét triggerek és kontextusok]
-
-## Eljárás
-1. [Első lépés]
-2. [Második lépés]
-...
-
-## Buktatók
-- [Ismert probléma és megoldása]
-
-## Ellenőrzés
-- [Hogyan validáld az eredményt]
-SKILLEOF
-bash scripts/marveen-api.sh skill-propose SKILL-NEV .claude/skill-javaslat/SKILL.md --reason-file .claude/skill-javaslat/indok.txt
-```
+Skilljavaslat beküldéséhez kövesd a mintát: `{{INSTALL_DIR}}/docs/agent-procedures-hu.md`.
 
 A javaslatot (`POST /api/skills/propose`) a segéd `skill-propose` igéje küldi; a karantén-kapcsoló állásától függően azonnal élesedik, vagy jóváhagyásra vár.
 
@@ -337,11 +310,7 @@ A skill-ek 3 szinten töltődnek:
 - **Level 1**: Teljes SKILL.md tartalom -- csak ha releváns
 - **Level 2**: Segédfájlok (scripts/, references/) -- csak ha specifikusan kell
 
-Az Anthropic skill-írási útmutatója (Skill authoring best practices, https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices) szerint:
-- "Keep SKILL.md body under 500 lines for optimal performance": a SKILL.md törzse (a frontmatter utáni rész) legfeljebb 500 sor. A részletek a `references/` alá kerülnek, a SKILL.md-ből linkelve.
-- "For reference files longer than 100 lines, include a table of contents at the top": a 100 sornál hosszabb referenciafájl tetején tartalomjegyzék áll, mert Claude "might use commands like head -100 to preview content rather than reading entire files".
-- "Keep references one level deep from SKILL.md": minden segédfájlra közvetlenül a SKILL.md mutasson (markdown-linkkel), ne egy másik segédfájl.
-- A fontos, törékeny lépés szkript legyen (alacsony szabadságfok), ne szöveges utasítás.
+Skill írásakor alkalmazd a fájlszerkezeti szabályokat: `{{INSTALL_DIR}}/docs/agent-procedures-hu.md`.
 
 **Skill írása vagy javítása után KÖTELEZŐ a linter az érintett skillen:**
 ```bash

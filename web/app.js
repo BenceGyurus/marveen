@@ -12852,6 +12852,7 @@ const STATUS_COMPONENT_LABELS = {
 document.getElementById('refreshStatusBtn').addEventListener('click', loadStatus)
 
 async function loadStatus() {
+  renderProviderStatus("statusProviders")
   const overallEl = document.getElementById('statusOverall')
   const gridEl = document.getElementById('statusServiceGrid')
   const listEl = document.getElementById('statusIncidentList')
@@ -15934,6 +15935,7 @@ async function loadUpdates() {
     summary.textContent = 'Hiba: ' + (err.message || err)
     applyBtn.hidden = true
   }
+  renderProviderStatus("updateProviders")
   renderDiagnoseOffer()
   renderCliUpdateOffer()
 }
@@ -15942,6 +15944,43 @@ async function loadUpdates() {
 // installed vs offered target (latest, or the AVX-safe pin on an AVX-less
 // host), a button that only POSTs the exact offered target, and the note that
 // running sessions keep the old binary until their next start.
+async function renderProviderStatus(id) {
+  const box = document.getElementById(id)
+  if (!box) return
+  try {
+    const response = await fetch('/api/updates/providers')
+    if (!response.ok) throw new Error()
+    const rows = await response.json()
+    box.replaceChildren()
+    for (const row of rows) {
+      const section = document.createElement('section')
+      const title = document.createElement('strong')
+      title.textContent = row.id === 'codex' ? 'Codex CLI' : 'Antigravity CLI'
+      section.append(title)
+      const line = text => {
+        const p = document.createElement('p')
+        p.textContent = text
+        section.append(p)
+      }
+      line(row.installed ? t('updates.cli.installed', { v: row.installed }) : t(row.present ? 'providers.probe_failed' : 'providers.missing'))
+      if (row.present) line(row.latest ? t('updates.cli.latest', { v: row.latest }) : t('providers.version_unknown'))
+      if (row.update === true) line(t('providers.update'))
+      if (row.update === false) line(t('providers.current'))
+      const u = row.usage
+      if (u) {
+        const counts = (input, output) => t('providers.counts', { input: input.toLocaleString(), output: output.toLocaleString() })
+        line(t('providers.session') + ' · ' + counts(u.input, u.output))
+        if (u.lastInput != null && u.lastOutput != null) line(t('providers.request') + ' · ' + counts(u.lastInput, u.lastOutput))
+        if (u.cached != null) line(t('providers.cached', { n: u.cached.toLocaleString() }))
+        if (u.at) line(new Date(u.at).toLocaleString())
+      } else line(t('providers.no_usage'))
+      box.append(section)
+    }
+  } catch {
+    box.textContent = t('providers.unavailable')
+  }
+}
+
 let _cliUpdatePoll = null
 async function renderCliUpdateOffer(fresh) {
   const box = document.getElementById('updatesCli')
@@ -20222,6 +20261,7 @@ function tuGetTimeRange() {
 }
 
 async function loadTokenUsage() {
+  renderProviderStatus('tokenProviders')
   const { from, to } = tuGetTimeRange()
   const agent = tuSelectedAgent
 
